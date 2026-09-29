@@ -1,4 +1,4 @@
-document.getElementById("open").onclick = async () => {
+document.getElementById("open").addEventListener("click", async () => {
   const tabs = await chrome.tabs.query({
     active: true,
     currentWindow: true
@@ -7,7 +7,6 @@ document.getElementById("open").onclick = async () => {
   const tab = tabs[0];
 
   if (!tab?.id) {
-    window.close();
     return;
   }
 
@@ -15,7 +14,9 @@ document.getElementById("open").onclick = async () => {
     await chrome.tabs.sendMessage(tab.id, {
       type: "TOGGLE_HOMEWORK_AI"
     });
-  } catch {
+  } catch (error) {
+    console.error("Could not contact Homework AI:", error);
+
     try {
       await chrome.scripting.executeScript({
         target: {
@@ -23,10 +24,13 @@ document.getElementById("open").onclick = async () => {
         },
         files: ["content.js"]
       });
-    } catch (error) {
-      console.error("Could not inject Homework AI:", error);
+    } catch (injectionError) {
+      console.error(
+        "Could not start Homework AI:",
+        injectionError
+      );
     }
   }
 
   window.close();
-};
+});
