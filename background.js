@@ -24,10 +24,15 @@ function normalizeHistory(history) {
     .slice(-20);
 }
 
+
+/* =========================
+   OPENAI
+========================= */
+
 async function callOpenAI(prompt, history) {
   const settings = await getSettings();
 
-  const model = settings.model || "gpt-5-mini";
+  const model = settings.model || "gpt-5.6";
 
   const input = [
     {
@@ -35,10 +40,12 @@ async function callOpenAI(prompt, history) {
       content: [
         {
           type: "input_text",
-          text: "You are a helpful homework assistant. Explain answers clearly and accurately. Help the student understand the work."
+          text:
+            "You are a helpful homework assistant. Explain answers clearly, accurately, and at an appropriate student level."
         }
       ]
     },
+
     ...normalizeHistory(history).map((message) => ({
       role: message.role,
       content: [
@@ -48,6 +55,7 @@ async function callOpenAI(prompt, history) {
         }
       ]
     })),
+
     {
       role: "user",
       content: [
@@ -59,23 +67,29 @@ async function callOpenAI(prompt, history) {
     }
   ];
 
-  const response = await fetch("https://api.openai.com/v1/responses", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${settings.apiKey}`
-    },
-    body: JSON.stringify({
-      model,
-      input
-    })
-  });
+  const response = await fetch(
+    "https://api.openai.com/v1/responses",
+    {
+      method: "POST",
+
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${settings.apiKey}`
+      },
+
+      body: JSON.stringify({
+        model,
+        input
+      })
+    }
+  );
 
   const data = await response.json();
 
   if (!response.ok) {
     throw new Error(
-      data?.error?.message || `OpenAI request failed (${response.status})`
+      data?.error?.message ||
+        `OpenAI request failed (${response.status})`
     );
   }
 
@@ -92,18 +106,94 @@ async function callOpenAI(prompt, history) {
   return text || "I couldn't generate an answer.";
 }
 
+
+/* =========================
+   GEMINI
+========================= */
+
+async function callGemini(prompt, history) {
+  const settings = await getSettings();
+
+  const model = settings.model || "gemini-3.8-flash";
+
+  const historyText = normalizeHistory(history)
+    .map(
+      (message) =>
+        `${message.role === "assistant" ? "Assistant" : "Student"}: ${
+          message.content
+        }`
+    )
+    .join("\n\n");
+
+  const fullPrompt =
+    historyText +
+    (historyText ? "\n\n" : "") +
+    `Student: ${prompt}`;
+
+  const response = await fetch(
+    "https://generativelanguage.googleapis.com/v1beta/interactions",
+    {
+      method: "POST",
+
+      headers: {
+        "Content-Type": "application/json",
+        "x-goog-api-key": settings.apiKey
+      },
+
+      body: JSON.stringify({
+        model,
+        input: fullPrompt,
+        system_instruction:
+          "You are a helpful homework assistant. Explain answers clearly, accurately, and at an appropriate student level."
+      })
+    }
+  );
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    throw new Error(
+      data?.error?.message ||
+        `Gemini request failed (${response.status})`
+    );
+  }
+
+  if (typeof data.output_text === "string") {
+    return data.output_text;
+  }
+
+  if (Array.isArray(data.outputs)) {
+    const text = data.outputs
+      .map((item) => item?.text || "")
+      .join("")
+      .trim();
+
+    if (text) return text;
+  }
+
+  return "I couldn't generate an answer.";
+}
+
+
+/* =========================
+   GROQ
+========================= */
+
 async function callGroq(prompt, history) {
   const settings = await getSettings();
 
-  const model = settings.model || "llama-3.3-70b-versatile";
+  const model =
+    settings.model || "openai/gpt-oss-120b";
 
   const messages = [
     {
       role: "system",
       content:
-        "You are a helpful homework assistant. Explain answers clearly and accurately."
+        "You are a helpful homework assistant. Explain answers clearly, accurately, and at an appropriate student level."
     },
+
     ...normalizeHistory(history),
+
     {
       role: "user",
       content: prompt
@@ -114,10 +204,12 @@ async function callGroq(prompt, history) {
     "https://api.groq.com/openai/v1/chat/completions",
     {
       method: "POST",
+
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${settings.apiKey}`
       },
+
       body: JSON.stringify({
         model,
         messages
@@ -129,7 +221,8 @@ async function callGroq(prompt, history) {
 
   if (!response.ok) {
     throw new Error(
-      data?.error?.message || `Groq request failed (${response.status})`
+      data?.error?.message ||
+        `Groq request failed (${response.status})`
     );
   }
 
@@ -139,104 +232,66 @@ async function callGroq(prompt, history) {
   );
 }
 
-async function callGemini(prompt, history) {
-  const settings = await getSettings();
 
-  const model = settings.model || "gemini-2.5-flash";
+/* =========================
+   MESSAGE HANDLER
+========================= */
 
-  const contents = [
-    ...normalizeHistory(history).map((message) => ({
-      role: message.role === "assistant" ? "model" : "user",
-      parts: [{ text: message.content }]
-    })),
-    {
-      role: "user",
-      parts: [{ text: prompt }]
+chrome.runtime.onMessage.addListener(
+  (message, sender, sendResponse) => {
+    if (message?.type !== "AI_REQUEST") {
+      return;
     }
-  ];
 
-  const response = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
-      model
-    )}:generateContent?key=${encodeURIComponent(settings.apiKey)}`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        systemInstruction: {
-          parts: [
-            {
-              text: "You are a helpful homework assistant. Explain answers clearly and accurately."
-            }
-          ]
-        },
-        contents
-      })
-    }
-  );
+    (async () => {
+      try {
+        const settings = await getSettings();
 
-  const data = await response.json();
+        if (!settings.apiKey) {
+          throw new Error(
+            "No API key is saved. Open the API Key tab and add your API key."
+          );
+        }
 
-  if (!response.ok) {
-    throw new Error(
-      data?.error?.message || `Gemini request failed (${response.status})`
-    );
+        const prompt = String(message.prompt || "").trim();
+
+        if (!prompt) {
+          throw new Error("No question was provided.");
+        }
+
+        const provider = settings.provider || "openai";
+
+        let text;
+
+        if (provider === "gemini") {
+          text = await callGemini(
+            prompt,
+            message.history
+          );
+        } else if (provider === "groq") {
+          text = await callGroq(
+            prompt,
+            message.history
+          );
+        } else {
+          text = await callOpenAI(
+            prompt,
+            message.history
+          );
+        }
+
+        sendResponse({
+          ok: true,
+          text
+        });
+      } catch (error) {
+        sendResponse({
+          ok: false,
+          error: error?.message || String(error)
+        });
+      }
+    })();
+
+    return true;
   }
-
-  return (
-    data?.candidates?.[0]?.content?.parts
-      ?.map((part) => part.text || "")
-      .join("")
-      .trim() || "I couldn't generate an answer."
-  );
-}
-
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message?.type !== "AI_REQUEST") {
-    return;
-  }
-
-  (async () => {
-    try {
-      const settings = await getSettings();
-
-      if (!settings.apiKey) {
-        throw new Error(
-          "No API key is saved. Open Homework AI and add your API key."
-        );
-      }
-
-      const provider = settings.provider || "openai";
-      const prompt = String(message.prompt || "");
-      const history = normalizeHistory(message.history);
-
-      if (!prompt.trim()) {
-        throw new Error("No question was provided.");
-      }
-
-      let text;
-
-      if (provider === "gemini") {
-        text = await callGemini(prompt, history);
-      } else if (provider === "groq") {
-        text = await callGroq(prompt, history);
-      } else {
-        text = await callOpenAI(prompt, history);
-      }
-
-      sendResponse({
-        ok: true,
-        text
-      });
-    } catch (error) {
-      sendResponse({
-        ok: false,
-        error: error?.message || String(error)
-      });
-    }
-  })();
-
-  return true;
-});
+);
