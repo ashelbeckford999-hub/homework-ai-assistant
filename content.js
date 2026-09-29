@@ -1,109 +1,553 @@
-if (window.__HOMEWORK_AI_LOADED__) {
-  // Already loaded.
-} else {
+(() => {
+  if (window.__HOMEWORK_AI_LOADED__) return;
   window.__HOMEWORK_AI_LOADED__ = true;
 
   let lastPageField = null;
+  let lastScannedText = "";
   let chatHistory = [];
 
-  const MODEL_OPTIONS = {
-    openai: [
-      {
-        name: "GPT-5.6 Sol",
-        id: "gpt-5.6-sol"
-      },
-      {
-        name: "GPT-5.6 Terra",
-        id: "gpt-5.6-terra"
-      },
-      {
-        name: "GPT-5.6 Luna",
-        id: "gpt-5.6-luna"
-      },
-      {
-        name: "GPT-5.6",
-        id: "gpt-5.6"
+  const isGoogleSlides =
+    location.hostname === "docs.google.com" &&
+    location.pathname.includes("/presentation/");
+
+  /* =========================================================
+     TEXT EXTRACTION
+  ========================================================= */
+
+  function cleanText(text) {
+    return String(text || "")
+      .replace(/\u00a0/g, " ")
+      .replace(/[ \t]+/g, " ")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+  }
+
+  function collectShadowText(root, output) {
+    if (!root) return;
+
+    const walker = document.createTreeWalker(
+      root,
+      NodeFilter.SHOW_ELEMENT
+    );
+
+    let node;
+
+    while ((node = walker.nextNode())) {
+      const el = node;
+
+      if (el.shadowRoot) {
+        const shadowText = el.shadowRoot.innerText;
+
+        if (shadowText) {
+          output.push(shadowText);
+        }
+
+        collectShadowText(el.shadowRoot, output);
       }
-    ],
+    }
+  }
 
-    gemini: [
-      {
-        name: "Gemini 3.8 Flash",
-        id: "gemini-3.8-flash"
-      },
-      {
-        name: "Gemini 3.7 Flash",
-        id: "gemini-3.7-flash"
-      },
-      {
-        name: "Gemini 3.6 Flash",
-        id: "gemini-3.6-flash"
-      },
-      {
-        name: "Gemini 3.5 Flash",
-        id: "gemini-3.5-flash"
-      },
-      {
-        name: "Gemini 3.1 Pro Preview",
-        id: "gemini-3.1-pro-preview"
-      },
-      {
-        name: "Gemini 3.5 Flash-Lite",
-        id: "gemini-3.5-flash-lite"
-      },
-      {
-        name: "Gemini 3.1 Flash-Lite",
-        id: "gemini-3.1-flash-lite"
-      },
-      {
-        name: "Gemini 3 Flash Preview",
-        id: "gemini-3-flash-preview"
-      },
-      {
-        name: "Gemini 2.5 Pro",
-        id: "gemini-2.5-pro"
-      },
-      {
-        name: "Gemini 2.5 Flash",
-        id: "gemini-2.5-flash"
-      },
-      {
-        name: "Gemini 2.5 Flash-Lite",
-        id: "gemini-2.5-flash-lite"
+  function collectAccessibilityText() {
+    const output = [];
+
+    const elements = document.querySelectorAll(
+      "[aria-label], [aria-labelledby], [title], [data-tooltip]"
+    );
+
+    for (const el of elements) {
+      const values = [
+        el.getAttribute("aria-label"),
+        el.getAttribute("title"),
+        el.getAttribute("data-tooltip")
+      ];
+
+      for (const value of values) {
+        if (value && value.trim()) {
+          output.push(value.trim());
+        }
       }
-    ],
+    }
 
-    groq: [
-      {
-        name: "GPT-OSS 120B",
-        id: "openai/gpt-oss-120b"
-      },
-      {
-        name: "GPT-OSS 20B",
-        id: "openai/gpt-oss-20b"
-      },
-      {
-        name: "Llama 3.3 70B",
-        id: "llama-3.3-70b-versatile"
+    return output;
+  }
+
+  function scanPageText() {
+    const parts = [];
+
+    /*
+     * Normal webpage text.
+     */
+    if (document.body) {
+      parts.push(document.body.innerText || "");
+    }
+
+    /*
+     * Accessibility labels.
+     * This is particularly important for Google Slides.
+     */
+    parts.push(collectAccessibilityText());
+
+    /*
+     * Shadow DOM text.
+     */
+    const shadowParts = [];
+    collectShadowText(document, shadowParts);
+    parts.push(shadowParts);
+
+    /*
+     * Inputs and textareas.
+     */
+    const inputs = document.querySelectorAll(
+      "input, textarea, [contenteditable='true']"
+    );
+
+    for (const input of inputs) {
+      if (input.value) {
+        parts.push(input.value);
       }
-    ]
-  };
 
-  const root = document.createElement("div");
+      if (input.textContent) {
+        parts.push(input.textContent);
+      }
 
-  root.id = "homework-ai-extension-root";
+      if (input.getAttribute("aria-label")) {
+        parts.push(input.getAttribute("aria-label"));
+      }
+    }
 
-  Object.assign(root.style, {
+    let text = parts
+      .flat(Infinity)
+      .filter(Boolean)
+      .join("\n");
+
+    text = cleanText(text);
+
+    /*
+     * Remove repeated lines.
+     */
+    const lines = text
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+
+    const unique = [];
+    const seen = new Set();
+
+    for (const line of lines) {
+      const key = line.toLowerCase();
+
+      if (!seen.has(key)) {
+        seen.add(key);
+        unique.push(line);
+      }
+    }
+
+    text = unique.join("\n");
+
+    /*
+     * Don't allow a gigantic page to overwhelm the model.
+     */
+    const MAX_SCAN = 30000;
+
+    if (text.length > MAX_SCAN) {
+      text = text.slice(0, MAX_SCAN) +
+        "\n\n[Page text truncated after 30,000 characters.]";
+    }
+
+    lastScannedText = text;
+
+    return text;
+  }
+
+  /* =========================================================
+     GOOGLE SLIDES EXTRA TEXT
+  ========================================================= */
+
+  function scanGoogleSlides() {
+    const parts = [];
+
+    /*
+     * Google Slides uses an accessibility layer in addition
+     * to its visual editor. Look for labels and text exposed
+     * through the accessibility tree.
+     */
+    const selectors = [
+      "[aria-label]",
+      "[role='textbox']",
+      "[role='button']",
+      "[role='document']",
+      "[role='group']",
+      "[contenteditable='true']",
+      "textarea",
+      "input"
+    ];
+
+    for (const selector of selectors) {
+      let elements;
+
+      try {
+        elements = document.querySelectorAll(selector);
+      } catch {
+        continue;
+      }
+
+      for (const el of elements) {
+        const values = [
+          el.getAttribute("aria-label"),
+          el.getAttribute("data-tooltip"),
+          el.getAttribute("title"),
+          el.value,
+          el.innerText,
+          el.textContent
+        ];
+
+        for (const value of values) {
+          if (value && String(value).trim()) {
+            parts.push(String(value).trim());
+          }
+        }
+      }
+    }
+
+    /*
+     * Include normal page text too.
+     */
+    if (document.body) {
+      parts.push(document.body.innerText || "");
+    }
+
+    /*
+     * Accessibility labels.
+     */
+    parts.push(collectAccessibilityText());
+
+    const result = cleanText(parts.join("\n"));
+
+    /*
+     * Deduplicate lines.
+     */
+    const seen = new Set();
+    const lines = [];
+
+    for (const line of result.split("\n")) {
+      const clean = line.trim();
+
+      if (!clean) continue;
+
+      const key = clean.toLowerCase();
+
+      if (!seen.has(key)) {
+        seen.add(key);
+        lines.push(clean);
+      }
+    }
+
+    let finalText = lines.join("\n");
+
+    if (finalText.length > 30000) {
+      finalText =
+        finalText.slice(0, 30000) +
+        "\n\n[Google Slides text truncated after 30,000 characters.]";
+    }
+
+    lastScannedText = finalText;
+
+    return finalText;
+  }
+
+  function scanCurrentPage() {
+    if (isGoogleSlides) {
+      return scanGoogleSlides();
+    }
+
+    return scanPageText();
+  }
+
+  /* =========================================================
+     EDITABLE FIELD DETECTION
+  ========================================================= */
+
+  function findEditableField() {
+    const active = document.activeElement;
+
+    if (
+      active &&
+      (
+        active.tagName === "TEXTAREA" ||
+        active.tagName === "INPUT" ||
+        active.isContentEditable
+      )
+    ) {
+      return active;
+    }
+
+    const candidates = [
+      "textarea",
+      "input:not([type='hidden'])",
+      "[contenteditable='true']",
+      "[role='textbox']"
+    ];
+
+    for (const selector of candidates) {
+      const elements = document.querySelectorAll(selector);
+
+      for (const element of elements) {
+        const rect = element.getBoundingClientRect();
+
+        if (
+          rect.width > 0 &&
+          rect.height > 0 &&
+          getComputedStyle(element).visibility !== "hidden"
+        ) {
+          return element;
+        }
+      }
+    }
+
+    return null;
+  }
+
+  document.addEventListener(
+    "focusin",
+    (event) => {
+      const target = event.target;
+
+      if (
+        target &&
+        (
+          target.tagName === "TEXTAREA" ||
+          target.tagName === "INPUT" ||
+          target.isContentEditable ||
+          target.getAttribute?.("role") === "textbox"
+        )
+      ) {
+        lastPageField = target;
+      }
+    },
+    true
+  );
+
+  function setNativeValue(element, value) {
+    if (!element) return false;
+
+    /*
+     * Normal input / textarea.
+     */
+    if (
+      element.tagName === "INPUT" ||
+      element.tagName === "TEXTAREA"
+    ) {
+      const prototype =
+        element.tagName === "TEXTAREA"
+          ? HTMLTextAreaElement.prototype
+          : HTMLInputElement.prototype;
+
+      const descriptor =
+        Object.getOwnPropertyDescriptor(
+          prototype,
+          "value"
+        );
+
+      if (descriptor?.set) {
+        descriptor.set.call(element, value);
+      } else {
+        element.value = value;
+      }
+
+      element.dispatchEvent(
+        new Event("input", {
+          bubbles: true
+        })
+      );
+
+      element.dispatchEvent(
+        new Event("change", {
+          bubbles: true
+        })
+      );
+
+      return true;
+    }
+
+    /*
+     * Contenteditable.
+     */
+    if (element.isContentEditable) {
+      element.focus();
+
+      const selection = window.getSelection();
+
+      if (selection) {
+        selection.removeAllRanges();
+
+        const range = document.createRange();
+
+        range.selectNodeContents(element);
+
+        selection.addRange(range);
+      }
+
+      try {
+        document.execCommand(
+          "insertText",
+          false,
+          value
+        );
+
+        element.dispatchEvent(
+          new InputEvent("input", {
+            bubbles: true,
+            inputType: "insertText",
+            data: value
+          })
+        );
+
+        return true;
+      } catch {
+        element.textContent = value;
+
+        element.dispatchEvent(
+          new Event("input", {
+            bubbles: true
+          })
+        );
+
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  /* =========================================================
+     WRITE INTO GOOGLE SLIDES
+  ========================================================= */
+
+  async function writeIntoPage(text) {
+    if (!text) {
+      throw new Error("There is no answer to write.");
+    }
+
+    /*
+     * Prefer the field that the user last clicked.
+     */
+    let target = lastPageField;
+
+    /*
+     * If that disappeared, look for an active editor.
+     */
+    if (!target || !document.contains(target)) {
+      target = findEditableField();
+    }
+
+    if (target) {
+      const success = setNativeValue(target, text);
+
+      if (success) {
+        return true;
+      }
+    }
+
+    /*
+     * Google Slides can have an editor that isn't exposed
+     * as a normal input. Try the currently active element.
+     */
+    const active = document.activeElement;
+
+    if (
+      active &&
+      active !== document.body &&
+      (
+        active.isContentEditable ||
+        active.tagName === "TEXTAREA" ||
+        active.tagName === "INPUT"
+      )
+    ) {
+      if (setNativeValue(active, text)) {
+        return true;
+      }
+    }
+
+    /*
+     * Last resort:
+     * put the answer on the clipboard so it can be pasted
+     * directly into the selected Google Slides text box.
+     */
+    try {
+      await navigator.clipboard.writeText(text);
+
+      throw new Error(
+        "Google Slides did not expose its text editor. " +
+        "Click inside a text box on the slide first, then click " +
+        "\"Write into page\" again. The answer has been copied to your clipboard, so Ctrl+V will paste it."
+      );
+    } catch (clipboardError) {
+      if (clipboardError.message.includes("Google Slides")) {
+        throw clipboardError;
+      }
+
+      throw new Error(
+        "Could not find a writable text box. Click inside the Google Slides text box first."
+      );
+    }
+  }
+
+  /* =========================================================
+     AI REQUEST
+  ========================================================= */
+
+  function askAI(prompt) {
+    return new Promise((resolve, reject) => {
+      chrome.runtime.sendMessage(
+        {
+          type: "AI_REQUEST",
+          prompt,
+          history: chatHistory
+        },
+        (response) => {
+          if (chrome.runtime.lastError) {
+            reject(
+              new Error(
+                chrome.runtime.lastError.message
+              )
+            );
+            return;
+          }
+
+          if (!response?.ok) {
+            reject(
+              new Error(
+                response?.error ||
+                "AI request failed."
+              )
+            );
+            return;
+          }
+
+          resolve(response.text || "");
+        }
+      );
+    });
+  }
+
+  /* =========================================================
+     UI
+  ========================================================= */
+
+  const host = document.createElement("div");
+
+  host.id = "homework-ai-host";
+
+  Object.assign(host.style, {
     position: "fixed",
     top: "20px",
     right: "20px",
-    zIndex: "2147483647",
-    fontFamily: "Arial, sans-serif"
+    zIndex: "2147483647"
   });
 
-  document.documentElement.appendChild(root);
+  document.documentElement.appendChild(host);
 
-  const shadow = root.attachShadow({
+  const shadow = host.attachShadow({
     mode: "open"
   });
 
@@ -118,16 +562,17 @@ if (window.__HOMEWORK_AI_LOADED__) {
         max-height: 85vh;
         background: #111827;
         color: white;
-        border-radius: 14px;
-        box-shadow: 0 10px 40px rgba(0,0,0,.45);
-        overflow: hidden;
         border: 1px solid #374151;
+        border-radius: 14px;
+        box-shadow: 0 15px 50px rgba(0,0,0,.45);
+        overflow: hidden;
+        font-family: Arial, sans-serif;
       }
 
       .header {
         display: flex;
-        justify-content: space-between;
         align-items: center;
+        justify-content: space-between;
         padding: 14px 16px;
         background: #1f2937;
       }
@@ -138,35 +583,25 @@ if (window.__HOMEWORK_AI_LOADED__) {
       }
 
       .close {
+        border: 0;
         background: transparent;
-        border: none;
-        color: #aaa;
-        font-size: 22px;
-        cursor: pointer;
-        padding: 0;
-      }
-
-      .close:hover {
         color: white;
+        font-size: 20px;
+        cursor: pointer;
       }
 
       .tabs {
         display: flex;
-        border-bottom: 1px solid #374151;
+        background: #0f172a;
       }
 
       .tab {
         flex: 1;
-        padding: 10px 5px;
-        border: none;
-        background: #111827;
+        border: 0;
+        padding: 10px;
+        background: transparent;
         color: #9ca3af;
         cursor: pointer;
-        font-size: 12px;
-      }
-
-      .tab:hover {
-        color: white;
       }
 
       .tab.active {
@@ -176,8 +611,8 @@ if (window.__HOMEWORK_AI_LOADED__) {
 
       .body {
         padding: 14px;
-        max-height: 70vh;
         overflow-y: auto;
+        max-height: 70vh;
       }
 
       textarea,
@@ -185,19 +620,11 @@ if (window.__HOMEWORK_AI_LOADED__) {
       select {
         width: 100%;
         padding: 10px;
-        margin-bottom: 10px;
         border-radius: 8px;
         border: 1px solid #4b5563;
-        background: #1f2937;
+        background: #0f172a;
         color: white;
         outline: none;
-        font-family: inherit;
-      }
-
-      textarea:focus,
-      input:focus,
-      select:focus {
-        border-color: #2563eb;
       }
 
       textarea {
@@ -205,72 +632,46 @@ if (window.__HOMEWORK_AI_LOADED__) {
         resize: vertical;
       }
 
-      select {
-        cursor: pointer;
-      }
-
       button.action {
         width: 100%;
+        margin-top: 8px;
         padding: 10px;
-        border: none;
+        border: 0;
         border-radius: 8px;
         background: #2563eb;
         color: white;
         cursor: pointer;
-        margin-bottom: 8px;
-        font-size: 14px;
-      }
-
-      button.action:hover {
-        background: #1d4ed8;
+        font-weight: bold;
       }
 
       button.secondary {
         background: #374151;
       }
 
-      button.secondary:hover {
-        background: #4b5563;
-      }
-
-      .answer {
-        white-space: pre-wrap;
-        background: #1f2937;
-        padding: 12px;
-        border-radius: 8px;
-        margin-top: 10px;
-        line-height: 1.5;
-        max-height: 300px;
-        overflow-y: auto;
+      button.danger {
+        background: #991b1b;
       }
 
       .status {
-        color: #9ca3af;
-        font-size: 12px;
-        margin-bottom: 8px;
-        line-height: 1.4;
-      }
-
-      .chat {
-        max-height: 280px;
-        overflow-y: auto;
-        margin-bottom: 10px;
-      }
-
-      .message {
+        margin-top: 10px;
         padding: 9px;
-        margin-bottom: 8px;
+        border-radius: 8px;
+        background: #1f2937;
+        color: #d1d5db;
+        white-space: pre-wrap;
+        font-size: 12px;
+      }
+
+      .answer {
+        margin-top: 12px;
+        padding: 12px;
+        background: #0f172a;
+        border: 1px solid #374151;
         border-radius: 8px;
         white-space: pre-wrap;
-        line-height: 1.4;
-      }
-
-      .user {
-        background: #1d4ed8;
-      }
-
-      .assistant {
-        background: #374151;
+        line-height: 1.45;
+        max-height: 300px;
+        overflow-y: auto;
       }
 
       .hidden {
@@ -279,948 +680,373 @@ if (window.__HOMEWORK_AI_LOADED__) {
 
       label {
         display: block;
-        margin-bottom: 5px;
-        font-size: 13px;
+        margin: 10px 0 5px;
+        font-size: 12px;
         color: #d1d5db;
       }
 
-      .model-info {
+      .small {
         font-size: 11px;
         color: #9ca3af;
-        margin-top: -5px;
-        margin-bottom: 10px;
-      }
-
-      .saved {
-        color: #86efac;
-      }
-
-      .error {
-        color: #fca5a5;
+        margin-top: 6px;
+        line-height: 1.4;
       }
     </style>
 
     <div class="panel">
-
       <div class="header">
-        <div class="title">
-          Homework AI
-        </div>
-
-        <button
-          class="close"
-          id="close"
-          title="Close"
-        >
-          ×
-        </button>
+        <div class="title">Homework AI</div>
+        <button class="close" id="close">×</button>
       </div>
 
       <div class="tabs">
-
-        <button
-          class="tab active"
-          data-tab="answer"
-        >
-          Answer / Write
-        </button>
-
-        <button
-          class="tab"
-          data-tab="ask"
-        >
-          Ask Homework
-        </button>
-
-        <button
-          class="tab"
-          data-tab="settings"
-        >
-          API Key
-        </button>
-
+        <button class="tab active" data-tab="answer">Answer</button>
+        <button class="tab" data-tab="ask">Ask</button>
+        <button class="tab" data-tab="key">API Key</button>
       </div>
 
       <div class="body">
 
-        <!-- ANSWER -->
-
-        <section id="answer">
-
-          <div
-            class="status"
-            id="answerStatus"
-          >
-            Enter a question or scan the page.
-          </div>
+        <div id="answerTab">
 
           <textarea
             id="question"
-            placeholder="Type your homework question..."
+            placeholder="Type a question or scan the page..."
           ></textarea>
 
-          <button
-            class="action"
-            id="scan"
-          >
+          <button class="action" id="scan">
             Scan Page
           </button>
 
-          <button
-            class="action"
-            id="answerBtn"
-          >
+          <button class="action" id="answer">
             Answer
           </button>
 
-          <button
-            class="action secondary"
-            id="writeBtn"
-          >
+          <button class="action secondary" id="write">
             Write into page
           </button>
 
-          <div
-            class="answer"
-            id="answerBox"
-          ></div>
+          <button class="action secondary" id="copy">
+            Copy Answer
+          </button>
 
-        </section>
+          <div class="status" id="scanStatus">
+            Ready.
+          </div>
 
+          <div class="answer" id="answerBox"></div>
 
-        <!-- ASK -->
+        </div>
 
-        <section
-          id="ask"
-          class="hidden"
-        >
-
-          <div
-            class="chat"
-            id="chat"
-          ></div>
+        <div id="askTab" class="hidden">
 
           <textarea
             id="askInput"
-            placeholder="Ask anything about your homework..."
+            placeholder="Ask Homework AI anything..."
           ></textarea>
 
-          <button
-            class="action"
-            id="askBtn"
-          >
+          <button class="action" id="askButton">
             Ask
           </button>
 
-          <button
-            class="action secondary"
-            id="voiceBtn"
-          >
-            🎤 Voice Input
-          </button>
+          <div class="answer" id="chatBox"></div>
 
-        </section>
+        </div>
 
+        <div id="keyTab" class="hidden">
 
-        <!-- SETTINGS -->
-
-        <section
-          id="settings"
-          class="hidden"
-        >
-
-          <label for="provider">
-            AI Provider
-          </label>
+          <label>Provider</label>
 
           <select id="provider">
-
-            <option value="openai">
-              OpenAI
-            </option>
-
-            <option value="gemini">
-              Google Gemini
-            </option>
-
-            <option value="groq">
-              Groq
-            </option>
-
+            <option value="openai">OpenAI</option>
+            <option value="gemini">Google Gemini</option>
+            <option value="groq">Groq</option>
           </select>
 
+          <label>Model</label>
 
-          <label for="model">
-            AI Model
-          </label>
+          <input
+            id="model"
+            placeholder="Enter the model ID"
+          />
 
-          <select id="model"></select>
-
-          <div
-            class="model-info"
-            id="modelInfo"
-          ></div>
-
-
-          <label for="apiKey">
-            API Key
-          </label>
+          <label>API Key</label>
 
           <input
             id="apiKey"
             type="password"
-            placeholder="Paste your API key"
+            placeholder="Paste API key"
           />
 
-
-          <button
-            class="action"
-            id="saveSettings"
-          >
+          <button class="action" id="saveKey">
             Save Settings
           </button>
 
-          <div
-            class="status"
-            id="settingsStatus"
-          ></div>
+          <div class="small">
+            Your API key is stored in Chrome's local extension storage.
+            Do not put your API key in GitHub.
+          </div>
 
-        </section>
+          <div class="status" id="keyStatus"></div>
+
+        </div>
 
       </div>
-
     </div>
   `;
 
+  const $ = (id) => shadow.getElementById(id);
 
-  /* =========================
-     HELPER
-  ========================= */
-
-  const $ = (selector) => {
-    return shadow.querySelector(selector);
-  };
-
-
-  /* =========================
-     TRACK WEBPAGE TEXT BOX
-  ========================= */
-
-  function isEditable(element) {
-    if (!element) {
-      return false;
-    }
-
-    if (root.contains(element)) {
-      return false;
-    }
-
-    if (
-      element.matches?.(
-        "textarea, input, [contenteditable='true']"
-      )
-    ) {
-      return true;
-    }
-
-    return false;
-  }
-
-
-  document.addEventListener(
-    "focusin",
-    (event) => {
-      if (isEditable(event.target)) {
-        lastPageField = event.target;
-      }
-    },
-    true
-  );
-
-
-  /* =========================
+  /* =========================================================
      TABS
-  ========================= */
+  ========================================================= */
 
-  function showSection(name) {
-    ["answer", "ask", "settings"].forEach(
-      (id) => {
-        const section = $("#" + id);
+  shadow.querySelectorAll(".tab").forEach((tab) => {
+    tab.addEventListener("click", () => {
+      shadow.querySelectorAll(".tab").forEach((t) => {
+        t.classList.remove("active");
+      });
 
-        if (id === name) {
-          section.classList.remove("hidden");
-        } else {
-          section.classList.add("hidden");
-        }
+      tab.classList.add("active");
+
+      $("answerTab").classList.add("hidden");
+      $("askTab").classList.add("hidden");
+      $("keyTab").classList.add("hidden");
+
+      const name = tab.dataset.tab;
+
+      if (name === "answer") {
+        $("answerTab").classList.remove("hidden");
       }
-    );
 
-    shadow
-      .querySelectorAll(".tab")
-      .forEach((tab) => {
-        tab.classList.toggle(
-          "active",
-          tab.dataset.tab === name
-        );
-      });
-  }
+      if (name === "ask") {
+        $("askTab").classList.remove("hidden");
+      }
 
-
-  shadow
-    .querySelectorAll(".tab")
-    .forEach((tab) => {
-      tab.addEventListener("click", () => {
-        showSection(tab.dataset.tab);
-      });
+      if (name === "key") {
+        $("keyTab").classList.remove("hidden");
+      }
     });
+  });
 
-
-  /* =========================
+  /* =========================================================
      CLOSE
-  ========================= */
+  ========================================================= */
 
-  $("#close").addEventListener(
-    "click",
-    () => {
-      root.remove();
-      window.__HOMEWORK_AI_LOADED__ = false;
-    }
-  );
+  $("close").addEventListener("click", () => {
+    host.remove();
+    window.__HOMEWORK_AI_LOADED__ = false;
+  });
 
+  /* =========================================================
+     SCAN
+  ========================================================= */
 
-  /* =========================
-     FIND QUESTION ON PAGE
-  ========================= */
-
-  function findQuestionFromPage() {
-    const elements = document.querySelectorAll(
-      "h1, h2, h3, h4, h5, p, li, label, td, th"
-    );
-
-    const questions = [];
-
-    for (const element of elements) {
-      if (root.contains(element)) {
-        continue;
-      }
-
-      const text = element.innerText?.trim();
+  $("scan").addEventListener("click", () => {
+    try {
+      const text = scanCurrentPage();
 
       if (!text) {
-        continue;
-      }
-
-      if (text.length < 10) {
-        continue;
-      }
-
-      if (text.length > 1000) {
-        continue;
-      }
-
-      const looksLikeQuestion =
-        text.includes("?") ||
-        /^(what|why|how|when|where|who|which|explain|describe|calculate|solve|find|define|compare|identify)\b/i.test(
-          text
-        );
-
-      if (looksLikeQuestion) {
-        questions.push(text);
-      }
-    }
-
-    return questions
-      .slice(0, 5)
-      .join("\n\n");
-  }
-
-
-  /* =========================
-     AI REQUEST
-  ========================= */
-
-  async function askAI(prompt) {
-    const response =
-      await chrome.runtime.sendMessage({
-        type: "AI_REQUEST",
-        prompt,
-        history: chatHistory
-      });
-
-    if (!response?.ok) {
-      throw new Error(
-        response?.error ||
-        "AI request failed."
-      );
-    }
-
-    return response.text;
-  }
-
-
-  /* =========================
-     SCAN
-  ========================= */
-
-  $("#scan").addEventListener(
-    "click",
-    () => {
-      const question =
-        findQuestionFromPage();
-
-      if (!question) {
-        $("#answerStatus").textContent =
-          "I couldn't find a question on this page.";
-
+        $("scanStatus").textContent =
+          "No readable text was found on this page.";
         return;
       }
 
-      $("#question").value = question;
+      $("question").value = text;
 
-      $("#answerStatus").textContent =
-        "Question found. Click Answer.";
+      $("scanStatus").textContent =
+        `Scanned ${text.length.toLocaleString()} characters` +
+        (isGoogleSlides
+          ? " from Google Slides."
+          : " from the page.");
+    } catch (error) {
+      $("scanStatus").textContent =
+        "Scan error: " + error.message;
     }
-  );
+  });
 
-
-  /* =========================
+  /* =========================================================
      ANSWER
-  ========================= */
+  ========================================================= */
 
-  $("#answerBtn").addEventListener(
-    "click",
-    async () => {
-      const question =
-        $("#question").value.trim();
+  $("answer").addEventListener("click", async () => {
+    const question = $("question").value.trim();
 
-      if (!question) {
-        $("#answerStatus").textContent =
-          "Enter a question first.";
-
-        return;
-      }
-
-      $("#answerStatus").textContent =
-        "Thinking...";
-
-      $("#answerBox").textContent = "";
-
-      try {
-        const answer =
-          await askAI(question);
-
-        $("#answerBox").textContent =
-          answer;
-
-        $("#answerStatus").textContent =
-          "Done.";
-      } catch (error) {
-        $("#answerStatus").textContent =
-          error.message ||
-          "Something went wrong.";
-      }
-    }
-  );
-
-
-  /* =========================
-     WRITE INTO PAGE
-  ========================= */
-
-  function setNativeValue(
-    element,
-    value
-  ) {
-    const prototype =
-      element.tagName === "TEXTAREA"
-        ? HTMLTextAreaElement.prototype
-        : HTMLInputElement.prototype;
-
-    const descriptor =
-      Object.getOwnPropertyDescriptor(
-        prototype,
-        "value"
-      );
-
-    if (descriptor?.set) {
-      descriptor.set.call(
-        element,
-        value
-      );
-    } else {
-      element.value = value;
+    if (!question) {
+      $("scanStatus").textContent =
+        "Enter a question or scan the page first.";
+      return;
     }
 
-    element.dispatchEvent(
-      new Event("input", {
-        bubbles: true
-      })
-    );
+    $("scanStatus").textContent =
+      "Thinking...";
 
-    element.dispatchEvent(
-      new Event("change", {
-        bubbles: true
-      })
-    );
-  }
+    $("answer").disabled = true;
 
+    try {
+      const text = await askAI(question);
 
-  function insertIntoEditable(
-    element,
-    text
-  ) {
-    if (!element) {
-      return false;
-    }
-
-    if (
-      element instanceof
-        HTMLTextAreaElement ||
-      element instanceof
-        HTMLInputElement
-    ) {
-      setNativeValue(
-        element,
-        text
-      );
-
-      element.focus();
-
-      return true;
-    }
-
-
-    if (element.isContentEditable) {
-      element.focus();
-
-      const selection =
-        document.getSelection();
-
-      if (
-        selection &&
-        selection.rangeCount
-      ) {
-        document.execCommand(
-          "insertText",
-          false,
-          text
-        );
-      } else {
-        element.textContent += text;
-      }
-
-      element.dispatchEvent(
-        new InputEvent("input", {
-          bubbles: true,
-          inputType: "insertText",
-          data: text
-        })
-      );
-
-      return true;
-    }
-
-    return false;
-  }
-
-
-  $("#writeBtn").addEventListener(
-    "click",
-    async () => {
-      const question =
-        $("#question").value.trim();
-
-      if (!question) {
-        $("#answerStatus").textContent =
-          "Enter a question first.";
-
-        return;
-      }
-
-      $("#answerStatus").textContent =
-        "Writing...";
-
-      try {
-        const answer =
-          await askAI(question);
-
-        const inserted =
-          insertIntoEditable(
-            lastPageField,
-            answer
-          );
-
-        if (inserted) {
-          $("#answerStatus").textContent =
-            "Answer written into the page.";
-        } else {
-          $("#answerBox").textContent =
-            answer;
-
-          $("#answerStatus").textContent =
-            "I couldn't find a text box. The answer is shown above.";
-        }
-      } catch (error) {
-        $("#answerStatus").textContent =
-          error.message ||
-          "Something went wrong.";
-      }
-    }
-  );
-
-
-  /* =========================
-     CHAT
-  ========================= */
-
-  function addChatMessage(
-    role,
-    text
-  ) {
-    const message =
-      document.createElement("div");
-
-    message.className =
-      `message ${role}`;
-
-    message.textContent = text;
-
-    $("#chat").appendChild(
-      message
-    );
-
-    $("#chat").scrollTop =
-      $("#chat").scrollHeight;
-  }
-
-
-  $("#askBtn").addEventListener(
-    "click",
-    async () => {
-      const input =
-        $("#askInput");
-
-      const question =
-        input.value.trim();
-
-      if (!question) {
-        return;
-      }
-
-      input.value = "";
-
-      addChatMessage(
-        "user",
-        question
-      );
+      $("answerBox").textContent = text;
 
       chatHistory.push({
         role: "user",
         content: question
       });
 
-      chatHistory =
-        chatHistory.slice(-20);
+      chatHistory.push({
+        role: "assistant",
+        content: text
+      });
 
-      try {
-        const answer =
-          await askAI(question);
+      chatHistory = chatHistory.slice(-20);
 
-        addChatMessage(
-          "assistant",
-          answer
-        );
+      $("scanStatus").textContent =
+        "Answer ready.";
+    } catch (error) {
+      $("scanStatus").textContent =
+        "Error: " + error.message;
+    } finally {
+      $("answer").disabled = false;
+    }
+  });
 
-        chatHistory.push({
-          role: "assistant",
-          content: answer
-        });
+  /* =========================================================
+     WRITE
+  ========================================================= */
 
-        chatHistory =
-          chatHistory.slice(-20);
+  $("write").addEventListener("click", async () => {
+    const text = $("answerBox").textContent.trim();
 
-      } catch (error) {
-        addChatMessage(
-          "assistant",
-          `Error: ${
-            error.message ||
-            "Request failed."
-          }`
-        );
-      }
+    if (!text) {
+      $("scanStatus").textContent =
+        "Generate an answer first.";
+      return;
+    }
+
+    $("scanStatus").textContent =
+      "Writing...";
+
+    try {
+      await writeIntoPage(text);
+
+      $("scanStatus").textContent =
+        isGoogleSlides
+          ? "Answer written into the selected text box."
+          : "Answer written into the page.";
+    } catch (error) {
+      $("scanStatus").textContent =
+        error.message;
+    }
+  });
+
+  /* =========================================================
+     COPY
+  ========================================================= */
+
+  $("copy").addEventListener("click", async () => {
+    const text = $("answerBox").textContent.trim();
+
+    if (!text) return;
+
+    try {
+      await navigator.clipboard.writeText(text);
+
+      $("scanStatus").textContent =
+        "Answer copied.";
+    } catch {
+      $("scanStatus").textContent =
+        "Could not copy the answer.";
+    }
+  });
+
+  /* =========================================================
+     ASK TAB
+  ========================================================= */
+
+  $("askButton").addEventListener("click", async () => {
+    const prompt = $("askInput").value.trim();
+
+    if (!prompt) return;
+
+    $("askButton").disabled = true;
+
+    $("chatBox").textContent =
+      "Thinking...";
+
+    try {
+      const text = await askAI(prompt);
+
+      $("chatBox").textContent = text;
+
+      chatHistory.push({
+        role: "user",
+        content: prompt
+      });
+
+      chatHistory.push({
+        role: "assistant",
+        content: text
+      });
+
+      chatHistory = chatHistory.slice(-20);
+
+      $("askInput").value = "";
+    } catch (error) {
+      $("chatBox").textContent =
+        "Error: " + error.message;
+    } finally {
+      $("askButton").disabled = false;
+    }
+  });
+
+  /* =========================================================
+     API SETTINGS
+  ========================================================= */
+
+  chrome.storage.local.get(
+    {
+      provider: "openai",
+      apiKey: "",
+      model: ""
+    },
+    (settings) => {
+      $("provider").value =
+        settings.provider || "openai";
+
+      $("apiKey").value =
+        settings.apiKey || "";
+
+      $("model").value =
+        settings.model || "";
     }
   );
 
-
-  /* =========================
-     ENTER KEY FOR CHAT
-  ========================= */
-
-  $("#askInput").addEventListener(
-    "keydown",
-    (event) => {
-      if (
-        event.key === "Enter" &&
-        !event.shiftKey
-      ) {
-        event.preventDefault();
-
-        $("#askBtn").click();
-      }
-    }
-  );
-
-
-  /* =========================
-     VOICE
-  ========================= */
-
-  $("#voiceBtn").addEventListener(
-    "click",
-    () => {
-      const SpeechRecognition =
-        window.SpeechRecognition ||
-        window.webkitSpeechRecognition;
-
-      if (!SpeechRecognition) {
-        addChatMessage(
-          "assistant",
-          "Voice input isn't supported in this browser."
-        );
-
-        return;
-      }
-
-      const recognition =
-        new SpeechRecognition();
-
-      recognition.lang =
-        "en-US";
-
-      recognition.interimResults =
-        false;
-
-      recognition.continuous =
-        false;
-
-      recognition.onstart = () => {
-        $("#voiceBtn").textContent =
-          "🎤 Listening...";
-      };
-
-      recognition.onresult =
-        (event) => {
-          const text =
-            event.results[0][0]
-              .transcript;
-
-          $("#askInput").value =
-            text;
-        };
-
-      recognition.onerror =
-        (event) => {
-          addChatMessage(
-            "assistant",
-            `Voice error: ${event.error}`
-          );
-        };
-
-      recognition.onend = () => {
-        $("#voiceBtn").textContent =
-          "🎤 Voice Input";
-      };
-
-      recognition.start();
-    }
-  );
-
-
-  /* =========================
-     MODEL DROPDOWN
-  ========================= */
-
-  function updateModelDropdown(
-    selectedModel = ""
-  ) {
+  $("saveKey").addEventListener("click", () => {
     const provider =
-      $("#provider").value;
+      $("provider").value;
 
-    const models =
-      MODEL_OPTIONS[provider] ||
-      MODEL_OPTIONS.openai;
-
-    const modelSelect =
-      $("#model");
-
-    modelSelect.innerHTML = "";
-
-    models.forEach(
-      (model) => {
-        const option =
-          document.createElement(
-            "option"
-          );
-
-        option.value =
-          model.id;
-
-        option.textContent =
-          model.name;
-
-        modelSelect.appendChild(
-          option
-        );
-      }
-    );
-
-    const selectedExists =
-      models.some(
-        (model) =>
-          model.id ===
-          selectedModel
-      );
-
-    if (selectedExists) {
-      modelSelect.value =
-        selectedModel;
-    } else {
-      modelSelect.value =
-        models[0].id;
-    }
-
-    updateModelInfo();
-  }
-
-
-  function updateModelInfo() {
-    const provider =
-      $("#provider").value;
+    const apiKey =
+      $("apiKey").value.trim();
 
     const model =
-      $("#model").value;
+      $("model").value.trim();
 
-    const info =
-      $("#modelInfo");
-
-    if (provider === "gemini") {
-      if (
-        model ===
-        "gemini-3.8-flash"
-      ) {
-        info.textContent =
-          "Gemini 3.8 Flash";
-      } else {
-        info.textContent =
-          "Google Gemini";
-      }
-    } else if (
-      provider === "openai"
-    ) {
-      info.textContent =
-        "OpenAI Responses API";
-    } else if (
-      provider === "groq"
-    ) {
-      info.textContent =
-        "Groq API";
-    } else {
-      info.textContent = "";
-    }
-  }
-
-
-  $("#provider").addEventListener(
-    "change",
-    () => {
-      updateModelDropdown();
-    }
-  );
-
-
-  $("#model").addEventListener(
-    "change",
-    () => {
-      updateModelInfo();
-    }
-  );
-
-
-  /* =========================
-     SAVE SETTINGS
-  ========================= */
-
-  $("#saveSettings").addEventListener(
-    "click",
-    async () => {
-      const provider =
-        $("#provider").value;
-
-      const apiKey =
-        $("#apiKey").value.trim();
-
-      const model =
-        $("#model").value;
-
-      if (!apiKey) {
-        $("#settingsStatus").textContent =
-          "Please enter an API key.";
-
-        $("#settingsStatus").className =
-          "status error";
-
-        return;
-      }
-
-      await chrome.storage.local.set({
+    chrome.storage.local.set(
+      {
         provider,
         apiKey,
         model
-      });
-
-      $("#settingsStatus").textContent =
-        "Settings saved.";
-
-      $("#settingsStatus").className =
-        "status saved";
-    }
-  );
-
-
-  /* =========================
-     LOAD SETTINGS
-  ========================= */
-
-  async function loadSettings() {
-    const settings =
-      await chrome.storage.local.get({
-        provider: "openai",
-        apiKey: "",
-        model: ""
-      });
-
-    if (
-      MODEL_OPTIONS[settings.provider]
-    ) {
-      $("#provider").value =
-        settings.provider;
-    } else {
-      $("#provider").value =
-        "openai";
-    }
-
-    $("#apiKey").value =
-      settings.apiKey || "";
-
-    updateModelDropdown(
-      settings.model || ""
+      },
+      () => {
+        $("keyStatus").textContent =
+          "Settings saved.";
+      }
     );
-  }
+  });
 
-
-  /* =========================
+  /* =========================================================
      TOGGLE MESSAGE
-  ========================= */
+  ========================================================= */
 
   chrome.runtime.onMessage.addListener(
     (message) => {
@@ -1228,26 +1054,23 @@ if (window.__HOMEWORK_AI_LOADED__) {
         message?.type ===
         "TOGGLE_HOMEWORK_AI"
       ) {
-        const panel =
-          $(".panel");
-
-        if (
-          panel.style.display ===
-          "none"
-        ) {
-          panel.style.display = "";
-        } else {
-          panel.style.display =
-            "none";
-        }
+        host.style.display =
+          host.style.display === "none"
+            ? "block"
+            : "none";
       }
     }
   );
 
-
-  /* =========================
-     START
-  ========================= */
-
-  loadSettings();
-}
+  /*
+   * Initial scan for pages where the user opens the
+   * assistant after loading the extension.
+   */
+  setTimeout(() => {
+    try {
+      if (isGoogleSlides) {
+        scanGoogleSlides();
+      }
+    } catch {}
+  }, 1500);
+})();
