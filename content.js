@@ -4,10 +4,93 @@ if (window.__HOMEWORK_AI_LOADED__) {
   window.__HOMEWORK_AI_LOADED__ = true;
 
   let lastPageField = null;
-  let lastPageSelection = null;
   let chatHistory = [];
 
+  const MODEL_OPTIONS = {
+    openai: [
+      {
+        name: "GPT-5.6 Sol",
+        id: "gpt-5.6-sol"
+      },
+      {
+        name: "GPT-5.6 Terra",
+        id: "gpt-5.6-terra"
+      },
+      {
+        name: "GPT-5.6 Luna",
+        id: "gpt-5.6-luna"
+      },
+      {
+        name: "GPT-5.6",
+        id: "gpt-5.6"
+      }
+    ],
+
+    gemini: [
+      {
+        name: "Gemini 3.8 Flash",
+        id: "gemini-3.8-flash"
+      },
+      {
+        name: "Gemini 3.7 Flash",
+        id: "gemini-3.7-flash"
+      },
+      {
+        name: "Gemini 3.6 Flash",
+        id: "gemini-3.6-flash"
+      },
+      {
+        name: "Gemini 3.5 Flash",
+        id: "gemini-3.5-flash"
+      },
+      {
+        name: "Gemini 3.1 Pro Preview",
+        id: "gemini-3.1-pro-preview"
+      },
+      {
+        name: "Gemini 3.5 Flash-Lite",
+        id: "gemini-3.5-flash-lite"
+      },
+      {
+        name: "Gemini 3.1 Flash-Lite",
+        id: "gemini-3.1-flash-lite"
+      },
+      {
+        name: "Gemini 3 Flash Preview",
+        id: "gemini-3-flash-preview"
+      },
+      {
+        name: "Gemini 2.5 Pro",
+        id: "gemini-2.5-pro"
+      },
+      {
+        name: "Gemini 2.5 Flash",
+        id: "gemini-2.5-flash"
+      },
+      {
+        name: "Gemini 2.5 Flash-Lite",
+        id: "gemini-2.5-flash-lite"
+      }
+    ],
+
+    groq: [
+      {
+        name: "GPT-OSS 120B",
+        id: "openai/gpt-oss-120b"
+      },
+      {
+        name: "GPT-OSS 20B",
+        id: "openai/gpt-oss-20b"
+      },
+      {
+        name: "Llama 3.3 70B",
+        id: "llama-3.3-70b-versatile"
+      }
+    ]
+  };
+
   const root = document.createElement("div");
+
   root.id = "homework-ai-extension-root";
 
   Object.assign(root.style, {
@@ -20,7 +103,9 @@ if (window.__HOMEWORK_AI_LOADED__) {
 
   document.documentElement.appendChild(root);
 
-  const shadow = root.attachShadow({ mode: "open" });
+  const shadow = root.attachShadow({
+    mode: "open"
+  });
 
   shadow.innerHTML = `
     <style>
@@ -29,12 +114,12 @@ if (window.__HOMEWORK_AI_LOADED__) {
       }
 
       .panel {
-        width: 380px;
+        width: 390px;
         max-height: 85vh;
         background: #111827;
         color: white;
         border-radius: 14px;
-        box-shadow: 0 10px 40px rgba(0,0,0,.4);
+        box-shadow: 0 10px 40px rgba(0,0,0,.45);
         overflow: hidden;
         border: 1px solid #374151;
       }
@@ -56,8 +141,13 @@ if (window.__HOMEWORK_AI_LOADED__) {
         background: transparent;
         border: none;
         color: #aaa;
-        font-size: 20px;
+        font-size: 22px;
         cursor: pointer;
+        padding: 0;
+      }
+
+      .close:hover {
+        color: white;
       }
 
       .tabs {
@@ -67,11 +157,16 @@ if (window.__HOMEWORK_AI_LOADED__) {
 
       .tab {
         flex: 1;
-        padding: 10px;
+        padding: 10px 5px;
         border: none;
         background: #111827;
-        color: #aaa;
+        color: #9ca3af;
         cursor: pointer;
+        font-size: 12px;
+      }
+
+      .tab:hover {
+        color: white;
       }
 
       .tab.active {
@@ -96,11 +191,22 @@ if (window.__HOMEWORK_AI_LOADED__) {
         background: #1f2937;
         color: white;
         outline: none;
+        font-family: inherit;
+      }
+
+      textarea:focus,
+      input:focus,
+      select:focus {
+        border-color: #2563eb;
       }
 
       textarea {
         min-height: 100px;
         resize: vertical;
+      }
+
+      select {
+        cursor: pointer;
       }
 
       button.action {
@@ -112,6 +218,7 @@ if (window.__HOMEWORK_AI_LOADED__) {
         color: white;
         cursor: pointer;
         margin-bottom: 8px;
+        font-size: 14px;
       }
 
       button.action:hover {
@@ -122,6 +229,10 @@ if (window.__HOMEWORK_AI_LOADED__) {
         background: #374151;
       }
 
+      button.secondary:hover {
+        background: #4b5563;
+      }
+
       .answer {
         white-space: pre-wrap;
         background: #1f2937;
@@ -129,16 +240,19 @@ if (window.__HOMEWORK_AI_LOADED__) {
         border-radius: 8px;
         margin-top: 10px;
         line-height: 1.5;
+        max-height: 300px;
+        overflow-y: auto;
       }
 
       .status {
         color: #9ca3af;
         font-size: 12px;
         margin-bottom: 8px;
+        line-height: 1.4;
       }
 
       .chat {
-        max-height: 250px;
+        max-height: 280px;
         overflow-y: auto;
         margin-bottom: 10px;
       }
@@ -148,6 +262,7 @@ if (window.__HOMEWORK_AI_LOADED__) {
         margin-bottom: 8px;
         border-radius: 8px;
         white-space: pre-wrap;
+        line-height: 1.4;
       }
 
       .user {
@@ -168,24 +283,74 @@ if (window.__HOMEWORK_AI_LOADED__) {
         font-size: 13px;
         color: #d1d5db;
       }
+
+      .model-info {
+        font-size: 11px;
+        color: #9ca3af;
+        margin-top: -5px;
+        margin-bottom: 10px;
+      }
+
+      .saved {
+        color: #86efac;
+      }
+
+      .error {
+        color: #fca5a5;
+      }
     </style>
 
     <div class="panel">
+
       <div class="header">
-        <div class="title">Homework AI</div>
-        <button class="close" id="close">×</button>
+        <div class="title">
+          Homework AI
+        </div>
+
+        <button
+          class="close"
+          id="close"
+          title="Close"
+        >
+          ×
+        </button>
       </div>
 
       <div class="tabs">
-        <button class="tab active" data-tab="answer">Answer / Write</button>
-        <button class="tab" data-tab="ask">Ask Homework</button>
-        <button class="tab" data-tab="settings">API Key</button>
+
+        <button
+          class="tab active"
+          data-tab="answer"
+        >
+          Answer / Write
+        </button>
+
+        <button
+          class="tab"
+          data-tab="ask"
+        >
+          Ask Homework
+        </button>
+
+        <button
+          class="tab"
+          data-tab="settings"
+        >
+          API Key
+        </button>
+
       </div>
 
       <div class="body">
 
+        <!-- ANSWER -->
+
         <section id="answer">
-          <div class="status" id="answerStatus">
+
+          <div
+            class="status"
+            id="answerStatus"
+          >
             Enter a question or scan the page.
           </div>
 
@@ -194,55 +359,112 @@ if (window.__HOMEWORK_AI_LOADED__) {
             placeholder="Type your homework question..."
           ></textarea>
 
-          <button class="action" id="scan">
+          <button
+            class="action"
+            id="scan"
+          >
             Scan Page
           </button>
 
-          <button class="action" id="answerBtn">
+          <button
+            class="action"
+            id="answerBtn"
+          >
             Answer
           </button>
 
-          <button class="action secondary" id="writeBtn">
+          <button
+            class="action secondary"
+            id="writeBtn"
+          >
             Write into page
           </button>
 
-          <div class="answer" id="answerBox"></div>
+          <div
+            class="answer"
+            id="answerBox"
+          ></div>
+
         </section>
 
-        <section id="ask" class="hidden">
-          <div class="chat" id="chat"></div>
+
+        <!-- ASK -->
+
+        <section
+          id="ask"
+          class="hidden"
+        >
+
+          <div
+            class="chat"
+            id="chat"
+          ></div>
 
           <textarea
             id="askInput"
             placeholder="Ask anything about your homework..."
           ></textarea>
 
-          <button class="action" id="askBtn">
+          <button
+            class="action"
+            id="askBtn"
+          >
             Ask
           </button>
 
-          <button class="action secondary" id="voiceBtn">
+          <button
+            class="action secondary"
+            id="voiceBtn"
+          >
             🎤 Voice Input
           </button>
+
         </section>
 
-        <section id="settings" class="hidden">
-          <label for="provider">AI Provider</label>
+
+        <!-- SETTINGS -->
+
+        <section
+          id="settings"
+          class="hidden"
+        >
+
+          <label for="provider">
+            AI Provider
+          </label>
 
           <select id="provider">
-            <option value="openai">OpenAI</option>
-            <option value="gemini">Google Gemini</option>
-            <option value="groq">Groq</option>
+
+            <option value="openai">
+              OpenAI
+            </option>
+
+            <option value="gemini">
+              Google Gemini
+            </option>
+
+            <option value="groq">
+              Groq
+            </option>
+
           </select>
 
-          <label for="model">Model</label>
 
-          <input
-            id="model"
-            placeholder="Leave blank for default"
-          />
+          <label for="model">
+            AI Model
+          </label>
 
-          <label for="apiKey">API Key</label>
+          <select id="model"></select>
+
+          <div
+            class="model-info"
+            id="modelInfo"
+          ></div>
+
+
+          <label for="apiKey">
+            API Key
+          </label>
 
           <input
             id="apiKey"
@@ -250,34 +472,60 @@ if (window.__HOMEWORK_AI_LOADED__) {
             placeholder="Paste your API key"
           />
 
-          <button class="action" id="saveSettings">
+
+          <button
+            class="action"
+            id="saveSettings"
+          >
             Save Settings
           </button>
 
-          <div class="status" id="settingsStatus"></div>
+          <div
+            class="status"
+            id="settingsStatus"
+          ></div>
+
         </section>
 
       </div>
+
     </div>
   `;
 
-  const $ = (selector) => shadow.querySelector(selector);
 
-  const panel = $(".panel");
+  /* =========================
+     HELPER
+  ========================= */
+
+  const $ = (selector) => {
+    return shadow.querySelector(selector);
+  };
+
+
+  /* =========================
+     TRACK WEBPAGE TEXT BOX
+  ========================= */
 
   function isEditable(element) {
-    if (!element) return false;
-
-    if (element === root || root.contains(element)) {
+    if (!element) {
       return false;
     }
 
-    if (element.matches?.("textarea, input, [contenteditable='true']")) {
+    if (root.contains(element)) {
+      return false;
+    }
+
+    if (
+      element.matches?.(
+        "textarea, input, [contenteditable='true']"
+      )
+    ) {
       return true;
     }
 
     return false;
   }
+
 
   document.addEventListener(
     "focusin",
@@ -289,77 +537,84 @@ if (window.__HOMEWORK_AI_LOADED__) {
     true
   );
 
-  document.addEventListener(
-    "selectionchange",
-    () => {
-      const selection = document.getSelection();
 
-      if (!selection || !selection.rangeCount) {
-        return;
-      }
-
-      const node = selection.anchorNode;
-
-      if (!node) {
-        return;
-      }
-
-      const element =
-        node.nodeType === Node.ELEMENT_NODE
-          ? node
-          : node.parentElement;
-
-      if (
-        element &&
-        !root.contains(element) &&
-        selection.toString().trim()
-      ) {
-        lastPageSelection = selection.toString().trim();
-      }
-    },
-    true
-  );
+  /* =========================
+     TABS
+  ========================= */
 
   function showSection(name) {
-    ["answer", "ask", "settings"].forEach((id) => {
-      const section = $("#" + id);
+    ["answer", "ask", "settings"].forEach(
+      (id) => {
+        const section = $("#" + id);
 
-      if (id === name) {
-        section.classList.remove("hidden");
-      } else {
-        section.classList.add("hidden");
+        if (id === name) {
+          section.classList.remove("hidden");
+        } else {
+          section.classList.add("hidden");
+        }
       }
-    });
+    );
 
-    shadow.querySelectorAll(".tab").forEach((tab) => {
-      tab.classList.toggle("active", tab.dataset.tab === name);
-    });
+    shadow
+      .querySelectorAll(".tab")
+      .forEach((tab) => {
+        tab.classList.toggle(
+          "active",
+          tab.dataset.tab === name
+        );
+      });
   }
 
-  shadow.querySelectorAll(".tab").forEach((tab) => {
-    tab.addEventListener("click", () => {
-      showSection(tab.dataset.tab);
-    });
-  });
 
-  $("#close").addEventListener("click", () => {
-    root.remove();
-    window.__HOMEWORK_AI_LOADED__ = false;
-  });
+  shadow
+    .querySelectorAll(".tab")
+    .forEach((tab) => {
+      tab.addEventListener("click", () => {
+        showSection(tab.dataset.tab);
+      });
+    });
+
+
+  /* =========================
+     CLOSE
+  ========================= */
+
+  $("#close").addEventListener(
+    "click",
+    () => {
+      root.remove();
+      window.__HOMEWORK_AI_LOADED__ = false;
+    }
+  );
+
+
+  /* =========================
+     FIND QUESTION ON PAGE
+  ========================= */
 
   function findQuestionFromPage() {
     const elements = document.querySelectorAll(
-      "h1, h2, h3, h4, p, li, label, td, th"
+      "h1, h2, h3, h4, h5, p, li, label, td, th"
     );
 
     const questions = [];
 
     for (const element of elements) {
-      if (root.contains(element)) continue;
+      if (root.contains(element)) {
+        continue;
+      }
 
       const text = element.innerText?.trim();
 
-      if (!text || text.length < 10 || text.length > 1000) {
+      if (!text) {
+        continue;
+      }
+
+      if (text.length < 10) {
+        continue;
+      }
+
+      if (text.length > 1000) {
         continue;
       }
 
@@ -374,73 +629,124 @@ if (window.__HOMEWORK_AI_LOADED__) {
       }
     }
 
-    return questions.slice(0, 5).join("\n\n");
+    return questions
+      .slice(0, 5)
+      .join("\n\n");
   }
 
+
+  /* =========================
+     AI REQUEST
+  ========================= */
+
   async function askAI(prompt) {
-    const response = await chrome.runtime.sendMessage({
-      type: "AI_REQUEST",
-      prompt,
-      history: chatHistory
-    });
+    const response =
+      await chrome.runtime.sendMessage({
+        type: "AI_REQUEST",
+        prompt,
+        history: chatHistory
+      });
 
     if (!response?.ok) {
-      throw new Error(response?.error || "AI request failed.");
+      throw new Error(
+        response?.error ||
+        "AI request failed."
+      );
     }
 
     return response.text;
   }
 
-  $("#scan").addEventListener("click", () => {
-    const question = findQuestionFromPage();
 
-    if (!question) {
+  /* =========================
+     SCAN
+  ========================= */
+
+  $("#scan").addEventListener(
+    "click",
+    () => {
+      const question =
+        findQuestionFromPage();
+
+      if (!question) {
+        $("#answerStatus").textContent =
+          "I couldn't find a question on this page.";
+
+        return;
+      }
+
+      $("#question").value = question;
+
       $("#answerStatus").textContent =
-        "I couldn't find a question on this page.";
-      return;
+        "Question found. Click Answer.";
     }
+  );
 
-    $("#question").value = question;
-    $("#answerStatus").textContent =
-      "Question found. Click Answer.";
-  });
 
-  $("#answerBtn").addEventListener("click", async () => {
-    const question = $("#question").value.trim();
+  /* =========================
+     ANSWER
+  ========================= */
 
-    if (!question) {
+  $("#answerBtn").addEventListener(
+    "click",
+    async () => {
+      const question =
+        $("#question").value.trim();
+
+      if (!question) {
+        $("#answerStatus").textContent =
+          "Enter a question first.";
+
+        return;
+      }
+
       $("#answerStatus").textContent =
-        "Enter a question first.";
-      return;
+        "Thinking...";
+
+      $("#answerBox").textContent = "";
+
+      try {
+        const answer =
+          await askAI(question);
+
+        $("#answerBox").textContent =
+          answer;
+
+        $("#answerStatus").textContent =
+          "Done.";
+      } catch (error) {
+        $("#answerStatus").textContent =
+          error.message ||
+          "Something went wrong.";
+      }
     }
+  );
 
-    $("#answerStatus").textContent = "Thinking...";
-    $("#answerBox").textContent = "";
 
-    try {
-      const answer = await askAI(question);
+  /* =========================
+     WRITE INTO PAGE
+  ========================= */
 
-      $("#answerBox").textContent = answer;
-      $("#answerStatus").textContent = "Done.";
-    } catch (error) {
-      $("#answerStatus").textContent =
-        error.message || "Something went wrong.";
-    }
-  });
-
-  function setNativeValue(element, value) {
+  function setNativeValue(
+    element,
+    value
+  ) {
     const prototype =
       element.tagName === "TEXTAREA"
         ? HTMLTextAreaElement.prototype
         : HTMLInputElement.prototype;
 
-    const descriptor = Object.getOwnPropertyDescriptor(
-      prototype,
-      "value"
-    );
+    const descriptor =
+      Object.getOwnPropertyDescriptor(
+        prototype,
+        "value"
+      );
 
     if (descriptor?.set) {
-      descriptor.set.call(element, value);
+      descriptor.set.call(
+        element,
+        value
+      );
     } else {
       element.value = value;
     }
@@ -458,27 +764,47 @@ if (window.__HOMEWORK_AI_LOADED__) {
     );
   }
 
-  function insertIntoEditable(element, text) {
+
+  function insertIntoEditable(
+    element,
+    text
+  ) {
     if (!element) {
       return false;
     }
 
     if (
-      element instanceof HTMLTextAreaElement ||
-      element instanceof HTMLInputElement
+      element instanceof
+        HTMLTextAreaElement ||
+      element instanceof
+        HTMLInputElement
     ) {
-      setNativeValue(element, text);
+      setNativeValue(
+        element,
+        text
+      );
+
       element.focus();
+
       return true;
     }
+
 
     if (element.isContentEditable) {
       element.focus();
 
-      const selection = document.getSelection();
+      const selection =
+        document.getSelection();
 
-      if (selection && selection.rangeCount) {
-        document.execCommand("insertText", false, text);
+      if (
+        selection &&
+        selection.rangeCount
+      ) {
+        document.execCommand(
+          "insertText",
+          false,
+          text
+        );
       } else {
         element.textContent += text;
       }
@@ -497,154 +823,431 @@ if (window.__HOMEWORK_AI_LOADED__) {
     return false;
   }
 
-  $("#writeBtn").addEventListener("click", async () => {
-    const question = $("#question").value.trim();
 
-    if (!question) {
-      $("#answerStatus").textContent =
-        "Enter a question first.";
-      return;
-    }
+  $("#writeBtn").addEventListener(
+    "click",
+    async () => {
+      const question =
+        $("#question").value.trim();
 
-    $("#answerStatus").textContent = "Writing...";
-
-    try {
-      const answer = await askAI(question);
-
-      const inserted = insertIntoEditable(
-        lastPageField,
-        answer
-      );
-
-      if (inserted) {
+      if (!question) {
         $("#answerStatus").textContent =
-          "Answer written into the page.";
-      } else {
-        $("#answerBox").textContent = answer;
-        $("#answerStatus").textContent =
-          "I couldn't find a text box. The answer is shown above.";
+          "Enter a question first.";
+
+        return;
       }
-    } catch (error) {
+
       $("#answerStatus").textContent =
-        error.message || "Something went wrong.";
+        "Writing...";
+
+      try {
+        const answer =
+          await askAI(question);
+
+        const inserted =
+          insertIntoEditable(
+            lastPageField,
+            answer
+          );
+
+        if (inserted) {
+          $("#answerStatus").textContent =
+            "Answer written into the page.";
+        } else {
+          $("#answerBox").textContent =
+            answer;
+
+          $("#answerStatus").textContent =
+            "I couldn't find a text box. The answer is shown above.";
+        }
+      } catch (error) {
+        $("#answerStatus").textContent =
+          error.message ||
+          "Something went wrong.";
+      }
     }
-  });
+  );
 
-  function addChatMessage(role, text) {
-    const message = document.createElement("div");
 
-    message.className = `message ${role}`;
+  /* =========================
+     CHAT
+  ========================= */
+
+  function addChatMessage(
+    role,
+    text
+  ) {
+    const message =
+      document.createElement("div");
+
+    message.className =
+      `message ${role}`;
+
     message.textContent = text;
 
-    $("#chat").appendChild(message);
-    $("#chat").scrollTop = $("#chat").scrollHeight;
+    $("#chat").appendChild(
+      message
+    );
+
+    $("#chat").scrollTop =
+      $("#chat").scrollHeight;
   }
 
-  $("#askBtn").addEventListener("click", async () => {
-    const input = $("#askInput");
-    const question = input.value.trim();
 
-    if (!question) return;
+  $("#askBtn").addEventListener(
+    "click",
+    async () => {
+      const input =
+        $("#askInput");
 
-    input.value = "";
+      const question =
+        input.value.trim();
 
-    addChatMessage("user", question);
+      if (!question) {
+        return;
+      }
 
-    chatHistory.push({
-      role: "user",
-      content: question
-    });
+      input.value = "";
 
-    try {
-      const answer = await askAI(question);
-
-      addChatMessage("assistant", answer);
+      addChatMessage(
+        "user",
+        question
+      );
 
       chatHistory.push({
-        role: "assistant",
-        content: answer
+        role: "user",
+        content: question
       });
 
-      chatHistory = chatHistory.slice(-20);
-    } catch (error) {
-      addChatMessage(
-        "assistant",
-        `Error: ${error.message || "Request failed."}`
-      );
-    }
-  });
+      chatHistory =
+        chatHistory.slice(-20);
 
-  $("#voiceBtn").addEventListener("click", () => {
-    const SpeechRecognition =
-      window.SpeechRecognition ||
-      window.webkitSpeechRecognition;
+      try {
+        const answer =
+          await askAI(question);
 
-    if (!SpeechRecognition) {
-      addChatMessage(
-        "assistant",
-        "Voice input isn't supported in this browser."
-      );
-      return;
-    }
+        addChatMessage(
+          "assistant",
+          answer
+        );
 
-    const recognition = new SpeechRecognition();
+        chatHistory.push({
+          role: "assistant",
+          content: answer
+        });
 
-    recognition.lang = "en-US";
-    recognition.interimResults = false;
-    recognition.continuous = false;
+        chatHistory =
+          chatHistory.slice(-20);
 
-    recognition.onresult = (event) => {
-      const text = event.results[0][0].transcript;
-      $("#askInput").value = text;
-    };
-
-    recognition.onerror = (event) => {
-      addChatMessage(
-        "assistant",
-        `Voice error: ${event.error}`
-      );
-    };
-
-    recognition.start();
-  });
-
-  $("#saveSettings").addEventListener("click", async () => {
-    const provider = $("#provider").value;
-    const apiKey = $("#apiKey").value.trim();
-    const model = $("#model").value.trim();
-
-    await chrome.storage.local.set({
-      provider,
-      apiKey,
-      model
-    });
-
-    $("#settingsStatus").textContent =
-      "Settings saved.";
-  });
-
-  async function loadSettings() {
-    const settings = await chrome.storage.local.get({
-      provider: "openai",
-      apiKey: "",
-      model: ""
-    });
-
-    $("#provider").value = settings.provider;
-    $("#apiKey").value = settings.apiKey;
-    $("#model").value = settings.model;
-  }
-
-  loadSettings();
-
-  // Allow the popup to toggle the panel.
-  chrome.runtime.onMessage.addListener((message) => {
-    if (message?.type === "TOGGLE_HOMEWORK_AI") {
-      if (panel.style.display === "none") {
-        panel.style.display = "";
-      } else {
-        panel.style.display = "none";
+      } catch (error) {
+        addChatMessage(
+          "assistant",
+          `Error: ${
+            error.message ||
+            "Request failed."
+          }`
+        );
       }
     }
-  });
+  );
+
+
+  /* =========================
+     ENTER KEY FOR CHAT
+  ========================= */
+
+  $("#askInput").addEventListener(
+    "keydown",
+    (event) => {
+      if (
+        event.key === "Enter" &&
+        !event.shiftKey
+      ) {
+        event.preventDefault();
+
+        $("#askBtn").click();
+      }
+    }
+  );
+
+
+  /* =========================
+     VOICE
+  ========================= */
+
+  $("#voiceBtn").addEventListener(
+    "click",
+    () => {
+      const SpeechRecognition =
+        window.SpeechRecognition ||
+        window.webkitSpeechRecognition;
+
+      if (!SpeechRecognition) {
+        addChatMessage(
+          "assistant",
+          "Voice input isn't supported in this browser."
+        );
+
+        return;
+      }
+
+      const recognition =
+        new SpeechRecognition();
+
+      recognition.lang =
+        "en-US";
+
+      recognition.interimResults =
+        false;
+
+      recognition.continuous =
+        false;
+
+      recognition.onstart = () => {
+        $("#voiceBtn").textContent =
+          "🎤 Listening...";
+      };
+
+      recognition.onresult =
+        (event) => {
+          const text =
+            event.results[0][0]
+              .transcript;
+
+          $("#askInput").value =
+            text;
+        };
+
+      recognition.onerror =
+        (event) => {
+          addChatMessage(
+            "assistant",
+            `Voice error: ${event.error}`
+          );
+        };
+
+      recognition.onend = () => {
+        $("#voiceBtn").textContent =
+          "🎤 Voice Input";
+      };
+
+      recognition.start();
+    }
+  );
+
+
+  /* =========================
+     MODEL DROPDOWN
+  ========================= */
+
+  function updateModelDropdown(
+    selectedModel = ""
+  ) {
+    const provider =
+      $("#provider").value;
+
+    const models =
+      MODEL_OPTIONS[provider] ||
+      MODEL_OPTIONS.openai;
+
+    const modelSelect =
+      $("#model");
+
+    modelSelect.innerHTML = "";
+
+    models.forEach(
+      (model) => {
+        const option =
+          document.createElement(
+            "option"
+          );
+
+        option.value =
+          model.id;
+
+        option.textContent =
+          model.name;
+
+        modelSelect.appendChild(
+          option
+        );
+      }
+    );
+
+    const selectedExists =
+      models.some(
+        (model) =>
+          model.id ===
+          selectedModel
+      );
+
+    if (selectedExists) {
+      modelSelect.value =
+        selectedModel;
+    } else {
+      modelSelect.value =
+        models[0].id;
+    }
+
+    updateModelInfo();
+  }
+
+
+  function updateModelInfo() {
+    const provider =
+      $("#provider").value;
+
+    const model =
+      $("#model").value;
+
+    const info =
+      $("#modelInfo");
+
+    if (provider === "gemini") {
+      if (
+        model ===
+        "gemini-3.8-flash"
+      ) {
+        info.textContent =
+          "Gemini 3.8 Flash";
+      } else {
+        info.textContent =
+          "Google Gemini";
+      }
+    } else if (
+      provider === "openai"
+    ) {
+      info.textContent =
+        "OpenAI Responses API";
+    } else if (
+      provider === "groq"
+    ) {
+      info.textContent =
+        "Groq API";
+    } else {
+      info.textContent = "";
+    }
+  }
+
+
+  $("#provider").addEventListener(
+    "change",
+    () => {
+      updateModelDropdown();
+    }
+  );
+
+
+  $("#model").addEventListener(
+    "change",
+    () => {
+      updateModelInfo();
+    }
+  );
+
+
+  /* =========================
+     SAVE SETTINGS
+  ========================= */
+
+  $("#saveSettings").addEventListener(
+    "click",
+    async () => {
+      const provider =
+        $("#provider").value;
+
+      const apiKey =
+        $("#apiKey").value.trim();
+
+      const model =
+        $("#model").value;
+
+      if (!apiKey) {
+        $("#settingsStatus").textContent =
+          "Please enter an API key.";
+
+        $("#settingsStatus").className =
+          "status error";
+
+        return;
+      }
+
+      await chrome.storage.local.set({
+        provider,
+        apiKey,
+        model
+      });
+
+      $("#settingsStatus").textContent =
+        "Settings saved.";
+
+      $("#settingsStatus").className =
+        "status saved";
+    }
+  );
+
+
+  /* =========================
+     LOAD SETTINGS
+  ========================= */
+
+  async function loadSettings() {
+    const settings =
+      await chrome.storage.local.get({
+        provider: "openai",
+        apiKey: "",
+        model: ""
+      });
+
+    if (
+      MODEL_OPTIONS[settings.provider]
+    ) {
+      $("#provider").value =
+        settings.provider;
+    } else {
+      $("#provider").value =
+        "openai";
+    }
+
+    $("#apiKey").value =
+      settings.apiKey || "";
+
+    updateModelDropdown(
+      settings.model || ""
+    );
+  }
+
+
+  /* =========================
+     TOGGLE MESSAGE
+  ========================= */
+
+  chrome.runtime.onMessage.addListener(
+    (message) => {
+      if (
+        message?.type ===
+        "TOGGLE_HOMEWORK_AI"
+      ) {
+        const panel =
+          $(".panel");
+
+        if (
+          panel.style.display ===
+          "none"
+        ) {
+          panel.style.display = "";
+        } else {
+          panel.style.display =
+            "none";
+        }
+      }
+    }
+  );
+
+
+  /* =========================
+     START
+  ========================= */
+
+  loadSettings();
 }
