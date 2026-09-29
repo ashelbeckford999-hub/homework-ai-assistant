@@ -2,52 +2,35 @@
   if (window.__HOMEWORK_AI_LOADED__) return;
   window.__HOMEWORK_AI_LOADED__ = true;
 
-  /*
-   * HOMEWORK AI ASSISTANT
-   * Google Docs + Google Slides
-   *
-   * Existing tabs preserved:
-   * 1. Answer
-   * 2. Ask
-   * 3. API Key
-   *
-   * The important changes are:
-   * - Google Docs title is never selected as the write target.
-   * - Google Slides title is avoided when possible.
-   * - Scan collects document/slide text.
-   * - Scan can ask Groq's vision model to read visible homework
-   *   from the page.
-   * - Write remembers the document/slide editing target.
-   */
+  // ============================================================
+  // GOOGLE DOCS / GOOGLE SLIDES ONLY
+  // ============================================================
 
-  const IS_DOCS =
+  const isGoogleDocs =
     location.hostname === "docs.google.com" &&
     location.pathname.startsWith("/document/");
 
-  const IS_SLIDES =
+  const isGoogleSlides =
     location.hostname === "docs.google.com" &&
     location.pathname.startsWith("/presentation/");
 
-  /*
-   * Do not run this extension on normal websites.
-   */
-  if (!IS_DOCS && !IS_SLIDES) {
+  const isSupportedPage =
+    isGoogleDocs || isGoogleSlides;
+
+  if (!isSupportedPage) {
     window.__HOMEWORK_AI_LOADED__ = false;
     return;
   }
 
   let chatHistory = [];
-  let lastPageField = null;
   let lastAnswer = "";
 
-  let lastScanText = "";
+  // This is deliberately NOT the Google Docs title input.
+  let lastEditorTarget = null;
 
-  let isScanning = false;
-  let isWriting = false;
-
-  // =========================
-  // BASIC HELPERS
-  // =========================
+  // ============================================================
+  // HELPERS
+  // ============================================================
 
   function clean(text) {
     return String(text || "")
@@ -57,40 +40,303 @@
       .trim();
   }
 
-  function sleep(ms) {
-    return new Promise(resolve => {
-      setTimeout(resolve, ms);
-    });
-  }
-
-  function isVisible(element) {
+  function isExtensionElement(element) {
     if (!element) return false;
 
-    const style =
-      window.getComputedStyle(element);
-
-    if (
-      style.display === "none" ||
-      style.visibility === "hidden" ||
-      style.opacity === "0"
-    ) {
-      return false;
-    }
-
-    const rect =
-      element.getBoundingClientRect();
-
     return (
-      rect.width > 0 &&
-      rect.height > 0
+      element === host ||
+      host?.contains(element)
     );
   }
 
-  function uniqueLines(text) {
+  function isTitleField(element) {
+    if (!element) return false;
+
+    const values = [
+      element.id,
+      element.getAttribute?.("aria-label"),
+      element.getAttribute?.("data-tooltip"),
+      element.getAttribute?.("data-placeholder"),
+      element.getAttribute?.("name"),
+      element.className
+    ]
+      .map(value => String(value || "").toLowerCase())
+      .join(" ");
+
+    return (
+      values.includes("document title") ||
+      values.includes("presentation title") ||
+      values.includes("untitled document") ||
+      values.includes("untitled presentation") ||
+      values.includes("docs-title") ||
+      values.includes("docs-title-input") ||
+      values.includes("document name")
+    );
+  }
+
+  function isEditableElement(element) {
+    if (!element) return false;
+
+    if (isExtensionElement(element)) {
+      return false;
+    }
+
+    if (isTitleField(element)) {
+      return false;
+    }
+
+    if (
+      element.tagName === "TEXTAREA" ||
+      element.tagName === "INPUT" ||
+      element.isContentEditable ||
+      element.getAttribute?.("role") === "textbox"
+    ) {
+      return true;
+    }
+
+    return false;
+  }
+
+  // ============================================================
+  // FIND GOOGLE DOCS EDITOR
+  // ============================================================
+
+  function findGoogleDocsEditor() {
+    if (!isGoogleDocs) {
+      return null;
+    }
+
+    const selectors = [
+      "textarea.docs-texteventtarget-iframe",
+      "textarea.docs-texteventtarget",
+      "textarea[aria-label*='document']",
+      "textarea[aria-label*='Document']",
+      "textarea"
+    ];
+
+    for (const selector of selectors) {
+      const elements = document.querySelectorAll(selector);
+
+      for (const element of elements) {
+        if (!element) continue;
+        if (isExtensionElement(element)) continue;
+        if (isTitleField(element)) continue;
+
+        const rect = element.getBoundingClientRect();
+
+        /*
+         * Google Docs often keeps its real editing textarea
+         * hidden/off-screen. We therefore don't require it to
+         * have a visible rectangle.
+         */
+
+        if (
+          element.tagName === "TEXTAREA" &&
+          !isTitleField(element)
+        ) {
+          return element;
+        }
+      }
+    }
+
+    /*
+     * Search inside same-origin iframes where possible.
+     */
+    const frames = document.querySelectorAll("iframe");
+
+    for (const frame of frames) {
+      try {
+        const frameDocument =
+          frame.contentDocument;
+
+        if (!frameDocument) continue;
+
+        const textareas =
+          frameDocument.querySelectorAll("textarea");
+
+        for (const textarea of textareas) {
+          if (!isTitleField(textarea)) {
+            return textarea;
+          }
+        }
+      } catch {
+        // Cross-origin iframe. Ignore it.
+      }
+    }
+
+    return null;
+  }
+
+  // ============================================================
+  // FIND GOOGLE SLIDES EDITOR
+  // ============================================================
+
+  function findGoogleSlidesEditor() {
+    if (!isGoogleSlides) {
+      return null;
+    }
+
+    const candidates = [];
+
+    document
+      .querySelectorAll(
+        "textarea, input, [contenteditable='true'], [role='textbox']"
+      )
+      .forEach(element => {
+        if (!element) return;
+        if (isExtensionElement(element)) return;
+        if (isTitleField(element)) return;
+
+        candidates.push(element);
+      });
+
+    /*
+     * Prefer the currently focused editable element.
+     */
+    const active = document.activeElement;
+
+    if (
+      active &&
+      isEditableElement(active)
+    ) {
+      return active;
+    }
+
+    /*
+     * Otherwise use the first non-title editor candidate.
+     */
+    return candidates[0] || null;
+  }
+
+  // ============================================================
+  // REMEMBER EDITOR FOCUS
+  // ============================================================
+
+  document.addEventListener(
+    "focusin",
+    event => {
+      const target = event.target;
+
+      if (!target) return;
+
+      if (isExtensionElement(target)) {
+        return;
+      }
+
+      /*
+       * VERY IMPORTANT:
+       * Never remember the Google Docs/Slides title.
+       */
+      if (isTitleField(target)) {
+        return;
+      }
+
+      if (isEditableElement(target)) {
+        lastEditorTarget = target;
+      }
+    },
+    true
+  );
+
+  document.addEventListener(
+    "mousedown",
+    event => {
+      const target = event.target;
+
+      if (!target) return;
+
+      if (isExtensionElement(target)) {
+        return;
+      }
+
+      if (isTitleField(target)) {
+        return;
+      }
+
+      /*
+       * If Google exposes an editable element under the mouse,
+       * remember it.
+       */
+      if (isEditableElement(target)) {
+        lastEditorTarget = target;
+      }
+
+      /*
+       * Google Docs uses a special editor target.
+       * If the click occurs somewhere in the document area,
+       * try to locate that editor after the click.
+       */
+      if (isGoogleDocs) {
+        setTimeout(() => {
+          const editor =
+            findGoogleDocsEditor();
+
+          if (editor && !isTitleField(editor)) {
+            lastEditorTarget = editor;
+          }
+        }, 100);
+      }
+
+      if (isGoogleSlides) {
+        setTimeout(() => {
+          const editor =
+            findGoogleSlidesEditor();
+
+          if (editor && !isTitleField(editor)) {
+            lastEditorTarget = editor;
+          }
+        }, 100);
+      }
+    },
+    true
+  );
+
+  // ============================================================
+  // SCAN GOOGLE DOCS / SLIDES TEXT
+  // ============================================================
+
+  function scanWorkspaceText() {
+    const textParts = [];
+
+    if (document.body) {
+      textParts.push(
+        document.body.innerText || ""
+      );
+    }
+
+    document
+      .querySelectorAll(
+        "input, textarea, [contenteditable='true'], [role='textbox']"
+      )
+      .forEach(element => {
+        if (isExtensionElement(element)) {
+          return;
+        }
+
+        if (isTitleField(element)) {
+          return;
+        }
+
+        if (element.value) {
+          textParts.push(element.value);
+        }
+
+        if (element.innerText) {
+          textParts.push(element.innerText);
+        }
+
+        if (element.textContent) {
+          textParts.push(element.textContent);
+        }
+      });
+
+    const cleaned =
+      clean(textParts.join("\n"));
+
     const seen = new Set();
     const lines = [];
 
-    for (const line of String(text || "").split("\n")) {
+    for (const line of cleaned.split("\n")) {
       const trimmed = line.trim();
 
       if (!trimmed) continue;
@@ -104,863 +350,118 @@
       }
     }
 
-    return lines.join("\n");
+    return lines
+      .join("\n")
+      .slice(0, 50000);
   }
 
-  function getDocumentId() {
-    if (!IS_DOCS) return null;
+  // ============================================================
+  // WRITE INTO GOOGLE DOCS
+  // ============================================================
 
-    const match =
-      location.pathname.match(
-        /\/document\/d\/([^/]+)/
-      );
-
-    return match ? match[1] : null;
-  }
-
-  function getPresentationId() {
-    if (!IS_SLIDES) return null;
-
-    const match =
-      location.pathname.match(
-        /\/presentation\/d\/([^/]+)/
-      );
-
-    return match ? match[1] : null;
-  }
-
-  // =========================
-  // GOOGLE DOCS TITLE CHECK
-  // =========================
-
-  function isDocsTitleField(element) {
-    if (!element) return false;
-
-    const aria =
-      (
-        element.getAttribute("aria-label") ||
-        ""
-      ).toLowerCase();
-
-    const name =
-      (
-        element.getAttribute("name") ||
-        ""
-      ).toLowerCase();
-
-    const id =
-      (
-        element.id ||
-        ""
-      ).toLowerCase();
-
-    const cls =
-      String(
-        element.className || ""
-      ).toLowerCase();
-
-    const combined =
-      `${aria} ${name} ${id} ${cls}`;
-
-    /*
-     * These are deliberately broad because Google's internal
-     * DOM changes between versions.
-     */
-
-    return (
-      combined.includes("document title") ||
-      combined.includes("title input") ||
-      combined.includes("title") &&
-      (
-        combined.includes("docs") ||
-        combined.includes("document")
-      )
-    );
-  }
-
-  // =========================
-  // GOOGLE SLIDES TITLE CHECK
-  // =========================
-
-  function looksLikeSlidesTitle(element) {
-    if (!element) return false;
-
-    const aria =
-      (
-        element.getAttribute("aria-label") ||
-        ""
-      ).toLowerCase();
-
-    const text =
-      (
-        element.innerText ||
-        element.textContent ||
-        ""
-      ).toLowerCase();
-
-    const combined =
-      `${aria} ${text}`;
-
-    return (
-      combined.includes("title placeholder") ||
-      combined.includes("title") ||
-      combined.includes("subtitle")
-    );
-  }
-
-  // =========================
-  // REMEMBER TEXT BOXES
-  // =========================
-
-  document.addEventListener(
-    "focusin",
-    event => {
-      const target =
-        event.target;
-
-      if (!target) return;
-
-      /*
-       * Never remember the Google Docs title.
-       */
-
-      if (
-        IS_DOCS &&
-        isDocsTitleField(target)
-      ) {
-        return;
-      }
-
-      /*
-       * Never remember obvious Slides title elements.
-       */
-
-      if (
-        IS_SLIDES &&
-        looksLikeSlidesTitle(target)
-      ) {
-        return;
-      }
-
-      if (
-        target.tagName === "INPUT" ||
-        target.tagName === "TEXTAREA" ||
-        target.isContentEditable ||
-        target.getAttribute?.("role") === "textbox"
-      ) {
-        lastPageField = target;
-      }
-    },
-    true
-  );
-
-  // =========================
-  // SCAN GOOGLE DOCS
-  // =========================
-
-  function scanGoogleDocs() {
-    const textParts = [];
-
-    /*
-     * Accessibility text is often the most useful DOM source
-     * for Google Docs.
-     */
-
-    document
-      .querySelectorAll(
-        "[role='textbox'], [contenteditable='true'], [aria-label]"
-      )
-      .forEach(element => {
-
-        if (!isVisible(element)) {
-          return;
-        }
-
-        if (
-          isDocsTitleField(element)
-        ) {
-          return;
-        }
-
-        const role =
-          (
-            element.getAttribute("role") ||
-            ""
-          ).toLowerCase();
-
-        /*
-         * Ignore obvious UI controls.
-         */
-
-        if (
-          role === "button" ||
-          role === "menuitem" ||
-          role === "toolbar"
-        ) {
-          return;
-        }
-
-        const value =
-          element.value ||
-          element.innerText ||
-          element.textContent ||
-          "";
-
-        if (value) {
-          textParts.push(value);
-        }
-
-        const aria =
-          element.getAttribute(
-            "aria-label"
-          );
-
-        if (
-          aria &&
-          !isDocsTitleField(element)
-        ) {
-          textParts.push(aria);
-        }
-      });
-
-    /*
-     * Also inspect the main application text, but remove obvious
-     * Google Docs interface words.
-     */
-
-    if (document.body) {
-
-      const bodyText =
-        document.body.innerText || "";
-
-      const lines =
-        bodyText.split("\n");
-
-      const filtered = [];
-
-      const chromeWords = new Set([
-        "File",
-        "Edit",
-        "View",
-        "Insert",
-        "Format",
-        "Tools",
-        "Extensions",
-        "Help",
-        "Share",
-        "Comments",
-        "Present",
-        "Undo",
-        "Redo",
-        "Print",
-        "Zoom"
-      ]);
-
-      for (const line of lines) {
-
-        const trimmed =
-          line.trim();
-
-        if (!trimmed) continue;
-
-        if (
-          chromeWords.has(trimmed)
-        ) {
-          continue;
-        }
-
-        filtered.push(trimmed);
-      }
-
-      textParts.push(
-        filtered.join("\n")
+  function writeGoogleDocs(text) {
+    if (!text) {
+      throw new Error(
+        "There is no answer to write."
       );
     }
 
-    const result =
-      uniqueLines(
-        clean(
-          textParts.join("\n")
-        )
-      );
-
-    return result.slice(
-      0,
-      50000
-    );
-  }
-
-  // =========================
-  // SCAN GOOGLE SLIDES
-  // =========================
-
-  function scanGoogleSlides() {
-    const textParts = [];
+    /*
+     * First use the target we remembered.
+     */
+    let target = lastEditorTarget;
 
     /*
-     * Google Slides exposes a lot of its slide content through
-     * accessibility labels.
+     * Make sure it still exists.
      */
-
-    document
-      .querySelectorAll(
-        "[role='textbox'], [contenteditable='true'], [aria-label]"
-      )
-      .forEach(element => {
-
-        if (!isVisible(element)) {
-          return;
-        }
-
-        if (
-          element.closest(
-            "#homework-ai-host"
-          )
-        ) {
-          return;
-        }
-
-        if (
-          looksLikeSlidesTitle(element)
-        ) {
-          /*
-           * We don't want the presentation title to become the
-           * homework question.
-           */
-          return;
-        }
-
-        const value =
-          element.innerText ||
-          element.textContent ||
-          element.getAttribute(
-            "aria-label"
-          ) ||
-          "";
-
-        if (value) {
-          textParts.push(value);
-        }
-      });
+    if (
+      !target ||
+      (!document.contains(target) &&
+        !isTitleField(target))
+    ) {
+      target = null;
+    }
 
     /*
-     * Body text fallback.
+     * Never write into a title.
      */
-
-    if (document.body) {
-
-      const bodyText =
-        document.body.innerText || "";
-
-      const lines =
-        bodyText.split("\n");
-
-      const filtered = [];
-
-      const chromeWords = new Set([
-        "File",
-        "Edit",
-        "View",
-        "Insert",
-        "Slide",
-        "Format",
-        "Arrange",
-        "Tools",
-        "Extensions",
-        "Help",
-        "Present",
-        "Share",
-        "Comments",
-        "Undo",
-        "Redo",
-        "Zoom"
-      ]);
-
-      for (const line of lines) {
-
-        const trimmed =
-          line.trim();
-
-        if (!trimmed) continue;
-
-        if (
-          chromeWords.has(trimmed)
-        ) {
-          continue;
-        }
-
-        filtered.push(trimmed);
-      }
-
-      textParts.push(
-        filtered.join("\n")
-      );
+    if (target && isTitleField(target)) {
+      target = null;
     }
 
-    const result =
-      uniqueLines(
-        clean(
-          textParts.join("\n")
-        )
-      );
-
-    return result.slice(
-      0,
-      50000
-    );
-  }
-
-  // =========================
-  // IMAGE DETECTION
-  // =========================
-
-  function findVisibleImages() {
-    const images = [];
-
-    document
-      .querySelectorAll(
-        "img, canvas"
-      )
-      .forEach(element => {
-
-        if (!isVisible(element)) {
-          return;
-        }
-
-        const rect =
-          element.getBoundingClientRect();
-
-        if (
-          rect.width < 50 ||
-          rect.height < 50
-        ) {
-          return;
-        }
-
-        /*
-         * Ignore our extension panel.
-         */
-
-        if (
-          element.closest(
-            "#homework-ai-host"
-          )
-        ) {
-          return;
-        }
-
-        images.push({
-          width: rect.width,
-          height: rect.height,
-          area:
-            rect.width *
-            rect.height,
-          alt:
-            element.getAttribute(
-              "alt"
-            ) ||
-            element.getAttribute(
-              "aria-label"
-            ) ||
-            ""
-        });
-      });
-
-    images.sort(
-      (a, b) =>
-        b.area - a.area
-    );
-
-    return images;
-  }
-
-  // =========================
-  // SCAN CURRENT PAGE
-  // =========================
-
-  async function scanNormalPage() {
-
-    if (isScanning) {
-      return lastScanText;
-    }
-
-    isScanning = true;
-
-    try {
-
-      $("status").textContent =
-        "Scanning Google " +
-        (IS_DOCS ? "Docs" : "Slides") +
-        "...";
-
-      let text;
-
-      if (IS_DOCS) {
-        text = scanGoogleDocs();
-      } else {
-        text = scanGoogleSlides();
-      }
-
-      const images =
-        findVisibleImages();
-
-      /*
-       * Tell the background worker to capture the visible
-       * Google Docs/Slides page when the user is using Groq.
-       *
-       * This is what allows homework that is visually displayed
-       * inside an image/canvas to be read.
-       */
-
-      let visionText = "";
-
-      try {
-
-        if (images.length > 0) {
-
-          $("status").textContent =
-            "Reading visible homework image...";
-
-          const response =
-            await send({
-              type: "VISION_SCAN",
-              pageType:
-                IS_DOCS
-                  ? "docs"
-                  : "slides",
-              documentId:
-                getDocumentId(),
-              presentationId:
-                getPresentationId()
-            });
-
-          if (
-            response?.text
-          ) {
-            visionText =
-              clean(response.text);
-          }
-        }
-
-      } catch (visionError) {
-
-        console.warn(
-          "Vision scan failed:",
-          visionError
-        );
-
-        /*
-         * Don't destroy the normal text scan just because image
-         * scanning wasn't available.
-         */
-
-      }
-
-      const combined =
-        uniqueLines(
-          clean(
-            [
-              text,
-              visionText
-            ]
-              .filter(Boolean)
-              .join("\n\n")
-          )
-        );
-
-      lastScanText =
-        combined.slice(
-          0,
-          50000
-        );
-
-      return lastScanText;
-
-    } finally {
-
-      isScanning = false;
-
-    }
-  }
-
-  // =========================
-  // WRITE TARGET DETECTION
-  // =========================
-
-  function isValidWriteTarget(target) {
-
+    /*
+     * Try the actual Google Docs editor.
+     */
     if (!target) {
-      return false;
+      target =
+        findGoogleDocsEditor();
     }
-
-    if (!document.contains(target)) {
-      return false;
-    }
-
-    if (
-      IS_DOCS &&
-      isDocsTitleField(target)
-    ) {
-      return false;
-    }
-
-    if (
-      IS_SLIDES &&
-      looksLikeSlidesTitle(target)
-    ) {
-      return false;
-    }
-
-    return (
-      target.tagName === "INPUT" ||
-      target.tagName === "TEXTAREA" ||
-      target.isContentEditable ||
-      target.getAttribute?.("role") === "textbox"
-    );
-  }
-
-  function findDocsEditor() {
-
-    /*
-     * First use the remembered field if it is not the title.
-     */
-
-    if (
-      isValidWriteTarget(
-        lastPageField
-      )
-    ) {
-      return lastPageField;
-    }
-
-    /*
-     * Look for Google's actual text event target.
-     *
-     * Google Docs has used several versions of these internal
-     * editor elements, so we check multiple patterns.
-     */
-
-    const selectors = [
-      "textarea.docs-texteventtarget-iframe",
-      "textarea.docs-texteventtarget",
-      "textarea[aria-label*='document']",
-      "textarea[aria-label*='Document']",
-      "[contenteditable='true']",
-      "[role='textbox']"
-    ];
-
-    for (
-      const selector of selectors
-    ) {
-
-      const elements =
-        document.querySelectorAll(
-          selector
-        );
-
-      for (
-        const element of elements
-      ) {
-
-        if (
-          !isVisible(element) &&
-          !(
-            element.tagName ===
-            "TEXTAREA"
-          )
-        ) {
-          continue;
-        }
-
-        if (
-          isDocsTitleField(
-            element
-          )
-        ) {
-          continue;
-        }
-
-        return element;
-      }
-    }
-
-    return null;
-  }
-
-  function findSlidesEditor() {
-
-    if (
-      isValidWriteTarget(
-        lastPageField
-      )
-    ) {
-      return lastPageField;
-    }
-
-    const candidates =
-      document.querySelectorAll(
-        "[contenteditable='true'], [role='textbox'], textarea"
-      );
-
-    let best = null;
-    let bestArea = 0;
-
-    for (
-      const element of candidates
-    ) {
-
-      if (
-        !document.contains(
-          element
-        )
-      ) {
-        continue;
-      }
-
-      if (
-        looksLikeSlidesTitle(
-          element
-        )
-      ) {
-        continue;
-      }
-
-      if (
-        element.closest(
-          "#homework-ai-host"
-        )
-      ) {
-        continue;
-      }
-
-      const rect =
-        element.getBoundingClientRect();
-
-      const area =
-        rect.width *
-        rect.height;
-
-      if (
-        area > bestArea
-      ) {
-        bestArea = area;
-        best = element;
-      }
-    }
-
-    return best;
-  }
-
-  // =========================
-  // TYPE LIKE NORMAL EDITOR
-  // =========================
-
-  async function insertTextIntoTarget(
-    target,
-    text
-  ) {
 
     if (!target) {
       throw new Error(
-        "No document text box was found."
+        "Google Docs editor could not be detected. Click inside the document text once, wait a moment, then click Write into Page."
       );
     }
 
-    target.focus();
-
-    await sleep(100);
+    if (isTitleField(target)) {
+      throw new Error(
+        "The Google Docs title was detected instead of the document body. Click inside the document text, not the title."
+      );
+    }
 
     /*
-     * Contenteditable.
+     * Focus the Google editor.
      */
+    try {
+      target.focus();
+    } catch {}
 
-    if (
-      target.isContentEditable
-    ) {
-
+    /*
+     * Google Docs uses a hidden textarea as a text event target.
+     *
+     * execCommand("insertText") is useful here because it sends
+     * an editing command rather than simply changing the title
+     * field's value.
+     */
+    try {
       const selection =
         window.getSelection();
 
-      const range =
-        document.createRange();
-
-      /*
-       * Put the insertion point at the current cursor.
-       * If no selection exists, append at the current position.
-       */
-
-      if (
-        selection &&
-        selection.rangeCount
-      ) {
-        /*
-         * Keep the existing cursor/selection.
-         */
-      } else {
-        range.selectNodeContents(
-          target
-        );
-
-        range.collapse(false);
-
+      if (selection) {
         selection.removeAllRanges();
-        selection.addRange(
-          range
-        );
       }
+    } catch {}
 
-      const inserted =
+    let inserted = false;
+
+    try {
+      inserted =
         document.execCommand(
           "insertText",
           false,
           text
         );
+    } catch {
+      inserted = false;
+    }
 
-      if (!inserted) {
+    /*
+     * Some Google Docs versions expose the editor as a textarea.
+     */
+    if (!inserted && target.tagName === "TEXTAREA") {
+      const prototype =
+        HTMLTextAreaElement.prototype;
 
-        const fragment =
-          document.createTextNode(
-            text
-          );
+      const setter =
+        Object.getOwnPropertyDescriptor(
+          prototype,
+          "value"
+        )?.set;
 
-        const currentSelection =
-          window.getSelection();
-
-        if (
-          currentSelection &&
-          currentSelection.rangeCount
-        ) {
-
-          const currentRange =
-            currentSelection.getRangeAt(
-              0
-            );
-
-          currentRange.deleteContents();
-
-          currentRange.insertNode(
-            fragment
-          );
-
-          currentRange.setStartAfter(
-            fragment
-          );
-
-          currentRange.collapse(
-            true
-          );
-
-          currentSelection.removeAllRanges();
-
-          currentSelection.addRange(
-            currentRange
-          );
-
-        } else {
-          target.appendChild(
-            fragment
-          );
-        }
+      if (setter) {
+        setter.call(target, text);
+      } else {
+        target.value = text;
       }
 
       target.dispatchEvent(
@@ -968,117 +469,31 @@
           "input",
           {
             bubbles: true,
-            inputType:
-              "insertText",
+            inputType: "insertText",
             data: text
           }
         )
       );
 
-      return true;
+      inserted = true;
     }
 
-    /*
-     * Standard input / textarea.
-     */
-
-    const prototype =
-      target.tagName === "TEXTAREA"
-        ? HTMLTextAreaElement.prototype
-        : HTMLInputElement.prototype;
-
-    const valueSetter =
-      Object.getOwnPropertyDescriptor(
-        prototype,
-        "value"
-      )?.set;
-
-    if (valueSetter) {
-      valueSetter.call(
-        target,
-        text
+    if (!inserted) {
+      throw new Error(
+        "Google Docs accepted the editor focus but did not accept the inserted text. Click inside the document body and try again."
       );
-    } else {
-      target.value = text;
     }
 
-    target.dispatchEvent(
-      new InputEvent(
-        "input",
-        {
-          bubbles: true,
-          inputType:
-            "insertText",
-          data: text
-        }
-      )
-    );
-
-    target.dispatchEvent(
-      new Event(
-        "change",
-        {
-          bubbles: true
-        }
-      )
-    );
+    lastEditorTarget = target;
 
     return true;
   }
 
-  // =========================
-  // WRITE INTO GOOGLE DOCS
-  // =========================
-
-  async function writeGoogleDocs(
-    text
-  ) {
-
-    if (!text) {
-      throw new Error(
-        "There is no answer to write."
-      );
-    }
-
-    /*
-     * The biggest fix:
-     *
-     * NEVER use the document title.
-     */
-
-    let target =
-      findDocsEditor();
-
-    if (
-      target &&
-      isDocsTitleField(target)
-    ) {
-      target = null;
-    }
-
-    if (!target) {
-
-      throw new Error(
-        "Click inside the Google Docs document body first, then click Write into Page. Do not click the document title."
-      );
-    }
-
-    await insertTextIntoTarget(
-      target,
-      text
-    );
-
-    return true;
-  }
-
-  // =========================
+  // ============================================================
   // WRITE INTO GOOGLE SLIDES
-  // =========================
+  // ============================================================
 
-  async function writeGoogleSlides(
-    text
-  ) {
-
+  function writeGoogleSlides(text) {
     if (!text) {
       throw new Error(
         "There is no answer to write."
@@ -1086,77 +501,134 @@
     }
 
     let target =
-      findSlidesEditor();
+      lastEditorTarget;
 
     if (
-      target &&
-      looksLikeSlidesTitle(
-        target
-      )
+      !target ||
+      (!document.contains(target) &&
+        !isTitleField(target))
     ) {
       target = null;
     }
 
-    if (!target) {
+    if (target && isTitleField(target)) {
+      target = null;
+    }
 
+    if (!target) {
+      target =
+        findGoogleSlidesEditor();
+    }
+
+    if (!target) {
       throw new Error(
-        "Click inside the slide text box where you want the answer, then click Write into Page."
+        "Google Slides editor could not be detected. Click inside the text box where you want the answer, then click Write into Page."
       );
     }
 
-    await insertTextIntoTarget(
-      target,
-      text
-    );
+    if (isTitleField(target)) {
+      throw new Error(
+        "The Slides title was detected instead of the selected text box."
+      );
+    }
+
+    target.focus();
+
+    let inserted = false;
+
+    try {
+      inserted =
+        document.execCommand(
+          "insertText",
+          false,
+          text
+        );
+    } catch {
+      inserted = false;
+    }
+
+    if (
+      !inserted &&
+      (
+        target.tagName === "TEXTAREA" ||
+        target.tagName === "INPUT"
+      )
+    ) {
+      const prototype =
+        target.tagName === "TEXTAREA"
+          ? HTMLTextAreaElement.prototype
+          : HTMLInputElement.prototype;
+
+      const setter =
+        Object.getOwnPropertyDescriptor(
+          prototype,
+          "value"
+        )?.set;
+
+      if (setter) {
+        setter.call(target, text);
+      } else {
+        target.value = text;
+      }
+
+      target.dispatchEvent(
+        new InputEvent(
+          "input",
+          {
+            bubbles: true,
+            inputType: "insertText",
+            data: text
+          }
+        )
+      );
+
+      target.dispatchEvent(
+        new Event(
+          "change",
+          {
+            bubbles: true
+          }
+        )
+      );
+
+      inserted = true;
+    }
+
+    if (!inserted) {
+      throw new Error(
+        "Google Slides did not accept the inserted text. Click directly inside the text box and try again."
+      );
+    }
+
+    lastEditorTarget = target;
 
     return true;
   }
 
-  // =========================
-  // WRITE ANSWER INTO PAGE
-  // =========================
+  // ============================================================
+  // WRITE INTO PAGE
+  // ============================================================
 
-  async function writeNormalPage(
-    text
-  ) {
-
-    if (!text) {
-      throw new Error(
-        "There is no answer to write."
-      );
+  function writeIntoWorkspace(text) {
+    if (isGoogleDocs) {
+      return writeGoogleDocs(text);
     }
 
-    if (IS_DOCS) {
-
-      await writeGoogleDocs(
-        text
-      );
-
-      return;
-    }
-
-    if (IS_SLIDES) {
-
-      await writeGoogleSlides(
-        text
-      );
-
-      return;
+    if (isGoogleSlides) {
+      return writeGoogleSlides(text);
     }
 
     throw new Error(
-      "This extension only works on Google Docs and Google Slides."
+      "This extension only works in Google Docs and Google Slides."
     );
   }
 
-  // =========================
-  // CREATE EXTENSION PANEL
-  // =========================
+  // ============================================================
+  // CREATE PANEL
+  // ============================================================
 
   const host =
-    document.createElement(
-      "div"
-    );
+    document.createElement("div");
 
   host.id =
     "homework-ai-host";
@@ -1171,9 +643,7 @@
     }
   );
 
-  document.documentElement.appendChild(
-    host
-  );
+  document.documentElement.appendChild(host);
 
   const shadow =
     host.attachShadow({
@@ -1333,7 +803,13 @@
 
       <div class="head">
         <span>Homework AI</span>
-        <button class="close" id="close">×</button>
+
+        <button
+          class="close"
+          id="close"
+        >
+          ×
+        </button>
       </div>
 
       <div class="tabs">
@@ -1499,17 +975,16 @@
     </div>
   `;
 
-  // =========================
-  // HELPER
-  // =========================
+  // ============================================================
+  // HELPERS
+  // ============================================================
 
   const $ =
-    id =>
-      shadow.getElementById(id);
+    id => shadow.getElementById(id);
 
-  // =========================
+  // ============================================================
   // TABS
-  // =========================
+  // ============================================================
 
   shadow
     .querySelectorAll(".tab")
@@ -1522,43 +997,32 @@
           shadow
             .querySelectorAll(".tab")
             .forEach(x =>
-              x.classList.remove(
-                "active"
-              )
+              x.classList.remove("active")
             );
 
-          tab.classList.add(
-            "active"
-          );
+          tab.classList.add("active");
 
           $("answerTab")
-            .classList.add(
-              "hidden"
-            );
+            .classList.add("hidden");
 
           $("askTab")
-            .classList.add(
-              "hidden"
-            );
+            .classList.add("hidden");
 
           $("keyTab")
-            .classList.add(
-              "hidden"
-            );
+            .classList.add("hidden");
 
           $(
-            tab.dataset.tab +
-            "Tab"
-          ).classList.remove(
-            "hidden"
-          );
+            tab.dataset.tab + "Tab"
+          ).classList.remove("hidden");
+
         }
       );
+
     });
 
-  // =========================
+  // ============================================================
   // CLOSE
-  // =========================
+  // ============================================================
 
   $("close").onclick = () => {
 
@@ -1569,9 +1033,9 @@
 
   };
 
-  // =========================
+  // ============================================================
   // SEND MESSAGE
-  // =========================
+  // ============================================================
 
   function send(message) {
 
@@ -1616,21 +1080,19 @@
 
       }
     );
+
   }
 
-  // =========================
-  // ASK AI
-  // =========================
+  // ============================================================
+  // AI
+  // ============================================================
 
-  async function getAI(
-    prompt
-  ) {
+  async function getAI(prompt) {
 
     const response =
       await send({
 
-        type:
-          "AI_REQUEST",
+        type: "AI_REQUEST",
 
         prompt,
 
@@ -1645,122 +1107,163 @@
     return lastAnswer;
   }
 
-  // =========================
-  // SCAN BUTTON
-  // =========================
+  // ============================================================
+  // SCAN
+  // ============================================================
 
   $("scanPage").onclick =
     async () => {
 
-      if (isScanning) return;
-
-      $("scanPage")
-        .disabled = true;
+      $("scanPage").disabled =
+        true;
 
       try {
 
-        const text =
-          await scanNormalPage();
+        $("status").textContent =
+          "Scanning Google Docs/Slides...";
 
-        if (!text) {
+        const localText =
+          scanWorkspaceText();
 
-          $("question")
-            .value = "";
+        /*
+         * Ask the background service worker to capture
+         * the visible Docs/Slides page and run Groq vision
+         * OCR on it.
+         */
+        let visualText = "";
 
-          $("status")
-            .textContent =
-              "No readable homework was found.";
+        try {
+
+          /*
+           * Hide our own panel so Groq does not see
+           * the Homework AI panel in the screenshot.
+           */
+          host.style.display =
+            "none";
+
+          await new Promise(
+            resolve =>
+              setTimeout(
+                resolve,
+                150
+              )
+          );
+
+          const visionResponse =
+            await send({
+              type:
+                "GROQ_VISION_SCAN"
+            });
+
+          visualText =
+            visionResponse.text ||
+            "";
+
+        } catch (visionError) {
+
+          visualText = "";
+
+          console.warn(
+            "Visual scan failed:",
+            visionError
+          );
+
+        } finally {
+
+          host.style.display =
+            "block";
+
+        }
+
+        const combined =
+          clean(
+            [
+              localText,
+              visualText
+            ]
+              .filter(Boolean)
+              .join("\n\n")
+          );
+
+        if (!combined) {
+
+          $("question").value =
+            "";
+
+          $("status").textContent =
+            "No readable homework text was found. Put the homework in the visible Docs/Slides area and try Scan Page again.";
 
           return;
         }
 
-        $("question")
-          .value = text;
+        $("question").value =
+          combined.slice(
+            0,
+            50000
+          );
 
-        $("status")
-          .textContent =
-            `Scanned ${text.length.toLocaleString()} characters.`;
+        $("status").textContent =
+          `Scan complete. Found approximately ${combined.length.toLocaleString()} characters.`;
 
       } catch (error) {
 
-        $("status")
-          .textContent =
-            "Scan error: " +
-            error.message;
+        host.style.display =
+          "block";
+
+        $("status").textContent =
+          "Scan error: " +
+          error.message;
 
       } finally {
 
-        $("scanPage")
-          .disabled = false;
+        $("scanPage").disabled =
+          false;
 
       }
+
     };
 
-  // =========================
-  // WRITE BUTTON
-  // =========================
+  // ============================================================
+  // WRITE
+  // ============================================================
 
   $("writePage").onclick =
-    async () => {
-
-      if (isWriting) return;
+    () => {
 
       if (!lastAnswer) {
 
-        $("status")
-          .textContent =
-            "Generate an answer first.";
+        $("status").textContent =
+          "Generate an answer first.";
 
         return;
+
       }
-
-      isWriting = true;
-
-      $("writePage")
-        .disabled = true;
 
       try {
 
-        /*
-         * Google Docs:
-         * writes to remembered document body,
-         * never the title.
-         *
-         * Google Slides:
-         * writes to remembered slide text box,
-         * never the presentation title.
-         */
+        $("status").textContent =
+          "Finding the Google Docs/Slides editing position...";
 
-        await writeNormalPage(
+        writeIntoWorkspace(
           lastAnswer
         );
 
-        $("status")
-          .textContent =
-            IS_DOCS
-              ? "Answer written into the Google Docs document."
-              : "Answer written into the Google Slides text box.";
+        $("status").textContent =
+          "Answer written into the document.";
 
       } catch (error) {
 
-        $("status")
-          .textContent =
-            "Write error: " +
-            error.message;
-
-      } finally {
-
-        isWriting = false;
-
-        $("writePage")
-          .disabled = false;
+        $("status").textContent =
+          "Write error: " +
+          error.message;
 
       }
+
     };
 
-  // =========================
-  // ANSWER BUTTON
-  // =========================
+  // ============================================================
+  // ANSWER
+  // ============================================================
 
   $("answer").onclick =
     async () => {
@@ -1772,109 +1275,95 @@
 
       if (!prompt) {
 
-        $("status")
-          .textContent =
-            "Scan the page or type a question first.";
+        $("status").textContent =
+          "Scan the page or type a question first.";
 
         return;
+
       }
 
-      $("status")
-        .textContent =
-          "Thinking...";
+      $("status").textContent =
+        "Thinking...";
 
-      $("answer")
-        .disabled = true;
+      $("answer").disabled =
+        true;
 
       try {
 
         const text =
-          await getAI(
-            prompt
-          );
+          await getAI(prompt);
 
         $("answerBox")
           .textContent =
-            text;
+          text;
 
         chatHistory.push({
-          role:
-            "user",
-          content:
-            prompt
+          role: "user",
+          content: prompt
         });
 
         chatHistory.push({
-          role:
-            "assistant",
-          content:
-            text
+          role: "assistant",
+          content: text
         });
 
         chatHistory =
-          chatHistory.slice(
-            -20
-          );
+          chatHistory.slice(-20);
 
-        $("status")
-          .textContent =
-            "Answer ready.";
+        $("status").textContent =
+          "Answer ready.";
 
       } catch (error) {
 
-        $("status")
-          .textContent =
-            "Error: " +
-            error.message;
+        $("status").textContent =
+          "Error: " +
+          error.message;
 
       } finally {
 
-        $("answer")
-          .disabled = false;
+        $("answer").disabled =
+          false;
 
       }
+
     };
 
-  // =========================
+  // ============================================================
   // COPY
-  // =========================
+  // ============================================================
 
   $("copy").onclick =
     async () => {
 
       if (!lastAnswer) {
 
-        $("status")
-          .textContent =
-            "There is no answer to copy.";
+        $("status").textContent =
+          "There is no answer to copy.";
 
         return;
+
       }
 
       try {
 
-        await navigator
-          .clipboard
-          .writeText(
-            lastAnswer
-          );
+        await navigator.clipboard
+          .writeText(lastAnswer);
 
-        $("status")
-          .textContent =
-            "Answer copied.";
+        $("status").textContent =
+          "Answer copied.";
 
       } catch {
 
-        $("status")
-          .textContent =
-            "Could not copy the answer.";
+        $("status").textContent =
+          "Could not copy the answer.";
 
       }
+
     };
 
-  // =========================
-  // ASK TAB
-  // =========================
+  // ============================================================
+  // ASK
+  // ============================================================
 
   $("askButton").onclick =
     async () => {
@@ -1884,102 +1373,78 @@
           .value
           .trim();
 
-      if (!prompt) {
-        return;
-      }
+      if (!prompt) return;
 
-      $("chatBox")
-        .textContent =
-          "Thinking...";
+      $("chatBox").textContent =
+        "Thinking...";
 
       try {
 
         const text =
-          await getAI(
-            prompt
-          );
+          await getAI(prompt);
 
         $("chatBox")
           .textContent =
-            text;
+          text;
 
         chatHistory.push({
-          role:
-            "user",
-          content:
-            prompt
+          role: "user",
+          content: prompt
         });
 
         chatHistory.push({
-          role:
-            "assistant",
-          content:
-            text
+          role: "assistant",
+          content: text
         });
 
         chatHistory =
-          chatHistory.slice(
-            -20
-          );
+          chatHistory.slice(-20);
 
-        $("askInput")
-          .value = "";
+        $("askInput").value =
+          "";
 
       } catch (error) {
 
         $("chatBox")
           .textContent =
-            "Error: " +
-            error.message;
+          "Error: " +
+          error.message;
 
       }
+
     };
 
-  // =========================
-  // LOAD SETTINGS
-  // =========================
+  // ============================================================
+  // SETTINGS
+  // ============================================================
 
   chrome.storage.local.get(
     {
-      provider:
-        "openai",
-
-      apiKey:
-        "",
-
-      model:
-        ""
+      provider: "openai",
+      apiKey: "",
+      model: ""
     },
     settings => {
 
-      $("provider")
-        .value =
-          settings.provider;
+      $("provider").value =
+        settings.provider;
 
-      $("apiKey")
-        .value =
-          settings.apiKey;
+      $("apiKey").value =
+        settings.apiKey;
 
-      $("model")
-        .value =
-          settings.model;
+      $("model").value =
+        settings.model;
 
     }
   );
-
-  // =========================
-  // SAVE SETTINGS
-  // =========================
 
   $("save").onclick =
     () => {
 
       chrome.storage.local.set(
         {
-
           provider:
-            $("provider")
-              .value,
+            $("provider").value,
 
           apiKey:
             $("apiKey")
@@ -1990,21 +1455,21 @@
             $("model")
               .value
               .trim()
-
         },
         () => {
 
           $("keyStatus")
             .textContent =
-              "Settings saved.";
+            "Settings saved.";
 
         }
       );
+
     };
 
-  // =========================
-  // POPUP TOGGLE
-  // =========================
+  // ============================================================
+  // TOGGLE
+  // ============================================================
 
   chrome.runtime.onMessage
     .addListener(
@@ -2029,6 +1494,7 @@
               "none";
 
           }
+
         }
 
       }
